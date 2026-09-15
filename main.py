@@ -1,7 +1,7 @@
 """Punto de entrada de IA-Trade.
 
-Evalúa el modelo con walk-forward diario y abre una segunda fase de
-investigación intradía. Todo sigue siendo simulación: no conecta con brokers.
+Evalúa el modelo con entrenamiento explícito, validación, test y walk-forward.
+Todo sigue siendo simulación: no conecta con brokers.
 """
 
 from config import (
@@ -17,7 +17,35 @@ from config import (
 )
 from evaluation import buy_and_hold_curve, summarize_values
 from market import download_market_data
-from walk_forward import run_directional_walk_forward, run_walk_forward
+from walk_forward import (
+    run_directional_walk_forward,
+    run_horizon_training_experiment,
+    run_walk_forward,
+)
+
+
+def print_horizon_experiment(ticker: str, stats_list: list[dict]) -> None:
+    print("=== EXPERIMENTO DE ENTRENAMIENTO | HORIZONTES ===")
+    print(f"Activo: {ticker}")
+    print("División: 60% entrenamiento / 20% validación / 20% test")
+    print("Importante: el test NO participa en el entrenamiento.")
+    print()
+    print("Horizonte | Train acc | Val acc | Test acc | Test balanced | Test Brier | Test log-loss")
+    for stats in stats_list:
+        train = stats["train"]
+        validation = stats["validation"]
+        test = stats["test"]
+        print(
+            f"{stats['horizon']:>9} | "
+            f"{train['accuracy_pct']:>9.2f}% | "
+            f"{validation['accuracy_pct']:>7.2f}% | "
+            f"{test['accuracy_pct']:>8.2f}% | "
+            f"{test['balanced_accuracy_pct']:>13.2f}% | "
+            f"{test['brier_score']:>10.4f} | "
+            f"{test['log_loss']:>12.4f}"
+        )
+    print()
+    print("Lectura: buscamos que validación y test conserven señal, no simplemente que Train sea alto.")
 
 
 def print_report(label: str, ticker: str, data, results, wf_stats) -> None:
@@ -97,7 +125,20 @@ def print_directional_diagnostic(ticker: str, stats: dict) -> None:
 
 
 def main() -> None:
-    print("=== VALIDACIÓN MULTIACTIVO | MISMA IA, SIN AJUSTAR UMBRALES ===")
+    print("=== IA-TRADE | LABORATORIO DE APRENDIZAJE Y VALIDACIÓN ===")
+
+    # Primero comprobamos explícitamente si el horizonte cambia la señal.
+    # Esto no optimiza la rentabilidad: compara 1/3/5/10/20 barras con un
+    # único modelo y deja un test final separado.
+    print(f"\nDescargando {TICKER} ({PERIOD}, {INTERVAL}) para el experimento de aprendizaje...")
+    horizon_data = download_market_data(TICKER, PERIOD, INTERVAL)
+    try:
+        horizon_stats = run_horizon_training_experiment(horizon_data)
+        print_horizon_experiment(TICKER, horizon_stats)
+    except ValueError as error:
+        print(f"\nNo se pudo ejecutar el experimento de horizontes: {error}")
+
+    print("\n=== VALIDACIÓN MULTIACTIVO | MISMA IA, SIN AJUSTAR UMBRALES ===")
     for ticker in VALIDATION_TICKERS:
         print(f"\nDescargando {ticker} ({PERIOD}, {INTERVAL})...")
         daily_data = download_market_data(ticker, PERIOD, INTERVAL)
@@ -116,9 +157,6 @@ def main() -> None:
         except ValueError as error:
             print(f"\nNo se pudo evaluar el diagnóstico direccional: {error}")
 
-    # Mantenemos una sola prueba intradía para no mezclar todavía demasiadas
-    # variables. Si la señal supera esta validación multiactivo, ampliaremos
-    # después el experimento intradía.
     print(f"\nDescargando {TICKER} ({INTRADAY_PERIOD}, {INTRADAY_INTERVAL})...")
     intraday_data = download_market_data(TICKER, INTRADAY_PERIOD, INTRADAY_INTERVAL)
 
