@@ -21,7 +21,11 @@ def _stats(target: pd.Series, prediction: np.ndarray) -> dict:
     }
 
 
-def _evaluate(train: pd.DataFrame, test: pd.DataFrame) -> dict:
+def _evaluate(
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    show_nn_plot: bool = False,
+) -> dict:
     target = test["target"].astype(int)
 
     majority_class = int(train["target"].astype(int).mode().iloc[0])
@@ -33,7 +37,7 @@ def _evaluate(train: pd.DataFrame, test: pd.DataFrame) -> dict:
     rf_prediction = rf.predict(test[FEATURES])
 
     nn = NeuralNetworkModel()
-    nn.fit(train, train["target"])
+    nn.fit(train, train["target"], show_plot=show_nn_plot)
     nn_prediction = nn.predict(test)
 
     return {
@@ -78,7 +82,7 @@ def run_model_comparison(
         validation = prepared.iloc[validation_start:validation_end]
 
         if len(train) >= 100 and len(validation) >= 30:
-            stats = _evaluate(train, validation)
+            stats = _evaluate(train, validation, show_nn_plot=False)
             stats.update(
                 {
                     "fold": len(validation_folds) + 1,
@@ -95,7 +99,9 @@ def run_model_comparison(
     if len(final_train) < 100 or len(final_test) < 30 or not validation_folds:
         raise ValueError("No hay suficientes datos para el test final.")
 
-    final_stats = _evaluate(final_train, final_test)
+    # Solo mostramos la curva del entrenamiento final. Los folds de validación
+    # siguen entrenando por épocas, pero no abren ventanas de gráficos.
+    final_stats = _evaluate(final_train, final_test, show_nn_plot=True)
     methods = ("majority", "momentum", "random_forest", "neural_network")
     validation_means = {
         method: {
