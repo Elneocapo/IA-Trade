@@ -1,9 +1,13 @@
-"""IA-Trade V16.1 - NVDA only, sequential 1H next-candle prediction.
+"""IA-Trade V16.2 - NVDA only, sequential 1H next-candle prediction.
 
 Paper trading / research only. No broker or live orders.
 At every hourly close the model uses only information already known, predicts
 THE NEXT 1H CANDLE, and the simulator makes the next decision after each close.
 The model context is the last ~10 regular US trading days (65 hourly bars).
+
+V16.2 keeps the same walk-forward semantics as V16.1 but replaces the slow
+boosting retraining with a regularized linear model and retrains less often.
+Predictions are still generated one candle at a time with no future leakage.
 """
 from __future__ import annotations
 import time
@@ -11,23 +15,25 @@ import warnings
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import Ridge
 warnings.filterwarnings("ignore")
 
-ASSET = "NVDA"
+ASSET = "NVDA"  # Change this single variable later to build another asset-specific AI.
 PERIOD = "2y"
 INTERVAL = "1h"
-LOOKBACK_BARS = 65
-MAX_HOLD_BARS = 13
+LOOKBACK_BARS = 65          # ~10 regular US trading days
+MAX_HOLD_BARS = 13          # ~2 regular trading days
 TRAIN_WINDOW = 900
-RETRAIN_EVERY = 24
-MODEL_MAX_ITER = 180
+RETRAIN_EVERY = 48          # retrain about once per trading week, predict every bar
+RIDGE_ALPHA = 8.0
 COST = 0.001
 INITIAL_CASH = 50.0
 
 
 def load_data() -> pd.DataFrame:
-    print(f"=== V16.1 | {ASSET} | {INTERVAL} | context={LOOKBACK_BARS} bars | max hold={MAX_HOLD_BARS} bars ===", flush=True)
+    print(f"=== V16.2 | {ASSET} | {INTERVAL} | context={LOOKBACK_BARS} bars | max hold={MAX_HOLD_BARS} bars ===", flush=True)
     df = yf.download(ASSET, period=PERIOD, interval=INTERVAL, auto_adjust=True, progress=False, prepost=False)
     if df.empty:
         raise RuntimeError(f"No data returned for {ASSET}")
@@ -85,14 +91,11 @@ def flatten_context(x: pd.DataFrame, end_pos: int) -> np.ndarray:
 
 
 def fit_model(X: np.ndarray, y: np.ndarray):
-    return HistGradientBoostingRegressor(
-        max_iter=MODEL_MAX_ITER,
-        learning_rate=0.05,
-        max_leaf_nodes=15,
-        min_samples_leaf=12,
-        l2_regularization=2.0,
-        loss="squared_error",
-        random_state=42,
+    # Standardization prevents large-volume/time features from dominating the
+    # regularized regression. Ridge is dramatically faster than repeated HGB fits.
+    return make_pipeline(
+        StandardScaler(),
+        Ridge(alpha=RIDGE_ALPHA),
     ).fit(X, y)
 
 
@@ -107,6 +110,8 @@ def sequential_predictions(df: pd.DataFrame, split_start: int, split_end: int) -
     if not valid_positions:
         return pd.DataFrame()
 
+    # Build historical examples once. A prediction at position i may only use
+    # examples with target position < i, so the next candle is never leaked.
     X_all, y_all, pos_all = [], [], []
     for i in range(LOOKBACK_BARS - 1, len(f) - 1):
         block = f.iloc[i - LOOKBACK_BARS + 1:i + 1]
@@ -117,8 +122,8 @@ def sequential_predictions(df: pd.DataFrame, split_start: int, split_end: int) -
         X_all.append(block.to_numpy(dtype=float).reshape(-1))
         y_all.append(float(target / max(scale, 0.0005)))
         pos_all.append(i)
-    X_all = np.asarray(X_all)
-    y_all = np.asarray(y_all)
+    X_all = np.asarray(X_all, dtype=float)
+    y_all = np.asarray(y_all, dtype=float)
     pos_all = np.asarray(pos_all)
 
     outputs = []
@@ -140,11 +145,11 @@ def sequential_predictions(df: pd.DataFrame, split_start: int, split_end: int) -
         pred_norm = float(model.predict(x)[0])
         pred_return = pred_norm * max(float(f["vol6"].iloc[i]), 0.0005)
         outputs.append((df.index[i], float(df["Close"].iloc[i]), pred_return, pred_norm))
-        if count == 1 or count % 100 == 0 or count == total:
+        if count == 1 or count % 200 == 0 or count == total:
             elapsed = time.time() - started
             rate = count / max(elapsed, 1e-9)
             eta = (total - count) / max(rate, 1e-9)
-            print(f"prediction {count}/{total} | {rate:.1f} bars/s | ETA ~{eta/60:.1f} min", flush=True)
+            print(f"prediction {count}/{total} | {rate:.1f} bars/s | ETA ~{eta:.1f} sec", flush=True)
     return pd.DataFrame(outputs, columns=["date", "price", "pred_return", "pred_norm"]).set_index("date")
 
 
@@ -238,9 +243,9 @@ def main():
     bh_cash = INITIAL_CASH * (1 + bh)
     elapsed = time.time() - overall_start
 
-    print("\n=== V16.1 NVDA SEQUENTIAL 1H SUMMARY ===")
+    print("\n=== V16.2 NVDA SEQUENTIAL 1H SUMMARY ===")
     print(f"asset={ASSET} | candles={INTERVAL} | history={PERIOD}")
-    print(f"context={LOOKBACK_BARS} bars (~10 trading days) | prediction=NEXT 1H candle | max_hold={MAX_HOLD_BARS} bars")
+    print(f"context={LOOKBACK_BARS} bars (~10 trading days) | prediction=NEXT 1H candle | max_hold={MAX_HOLD_BARS} bars (~2 trading days)")
     print(f"data={df.index[0]} -> {df.index[-1]} | total_bars={len(df)}")
     print(f"validation={vstart} -> {vend} | test={tstart} -> {tend}")
     print(f"test duration={duration_text(tstart, tend)}")
