@@ -7,6 +7,7 @@ investigación intradía. Todo sigue siendo simulación: no conecta con brokers.
 from config import (
     INITIAL_CASH,
     INTERVAL,
+    INTRADAY_HORIZON_BARS,
     INTRADAY_INTERVAL,
     INTRADAY_PERIOD,
     INTRADAY_TEST_SIZE,
@@ -31,8 +32,12 @@ def print_report(label: str, data, results, wf_stats) -> None:
         f"{wf_stats['test_end']} ({wf_stats['test_days']} barras)"
     )
     print(f"Ventanas walk-forward:  {wf_stats['windows']}")
+    print(f"Horizonte objetivo:     {wf_stats['horizon_bars']} barras")
     print(f"Entrada por confianza:  >= {wf_stats['entry_threshold']:.2f}")
-    print(f"Salida por confianza:   <  {wf_stats['exit_threshold']:.2f}")
+    if wf_stats["horizon_bars"] == 1:
+        print(f"Salida por confianza:   <  {wf_stats['exit_threshold']:.2f}")
+    else:
+        print("Salida:                 horizonte fijo")
     print(f"Capital inicial:        {ia_stats['initial_value']:.2f} €")
     print(f"Valor final IA:         {ia_stats['final_value']:.2f} €")
     print(f"Rentabilidad IA:        {ia_stats['return_pct']:.2f} %")
@@ -75,6 +80,7 @@ def main() -> None:
             intraday_data,
             train_size=INTRADAY_TRAIN_SIZE,
             test_size=INTRADAY_TEST_SIZE,
+            horizon_bars=INTRADAY_HORIZON_BARS,
         )
         print_report(
             "Walk-Forward ML | Intradía 15m",
