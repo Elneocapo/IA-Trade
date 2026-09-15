@@ -31,7 +31,7 @@ WALK_FORWARD_SPLITS = 4
 
 
 def build_sequences(data):
-    """Crea ejemplos donde cada muestra contiene las últimas 32 velas."""
+    """Crea secuencias con estructura de vela, tendencia, momentum, volatilidad y volumen."""
     close = data["Close"].astype(float)
     open_price = data["Open"].astype(float)
     high = data["High"].astype(float)
@@ -41,20 +41,54 @@ def build_sequences(data):
     log_return = np.log(close / close.shift(1)).replace([np.inf, -np.inf], np.nan)
     range_pct = (high - low) / close
     body_pct = (close - open_price) / close
+    upper_wick_pct = (high - np.maximum(open_price, close)) / close
+    lower_wick_pct = (np.minimum(open_price, close) - low) / close
     volume_change = np.log(volume / volume.shift(1)).replace([np.inf, -np.inf], np.nan)
 
-    frame = np.column_stack([
-        log_return.to_numpy(),
-        range_pct.to_numpy(),
-        body_pct.to_numpy(),
-        ((high - close) / close).to_numpy(),
-        ((close - low) / close).to_numpy(),
-        volume_change.to_numpy(),
-    ])
+    ema_8 = close.ewm(span=8, adjust=False).mean()
+    ema_21 = close.ewm(span=21, adjust=False).mean()
+    distance_ema_8 = close / ema_8 - 1
+    distance_ema_21 = close / ema_21 - 1
+    ema_spread = ema_8 / ema_21 - 1
+
+    momentum_4 = close / close.shift(4) - 1
+    momentum_8 = close / close.shift(8) - 1
+    volatility_8 = log_return.rolling(8, min_periods=8).std()
+    volatility_16 = log_return.rolling(16, min_periods=16).std()
+    volatility_32 = log_return.rolling(32, min_periods=16).std()
+
+    relative_volume = volume / volume.rolling(16, min_periods=8).mean() - 1
+    rolling_high_16 = high.rolling(16, min_periods=16).max()
+    rolling_low_16 = low.rolling(16, min_periods=16).min()
+    rolling_high_32 = high.rolling(32, min_periods=16).max()
+    rolling_low_32 = low.rolling(32, min_periods=16).min()
+    position_16 = (close - rolling_low_16) / (rolling_high_16 - rolling_low_16)
+    position_32 = (close - rolling_low_32) / (rolling_high_32 - rolling_low_32)
+
+    feature_series = [
+        log_return,
+        range_pct,
+        body_pct,
+        upper_wick_pct,
+        lower_wick_pct,
+        volume_change,
+        distance_ema_8,
+        distance_ema_21,
+        ema_spread,
+        momentum_4,
+        momentum_8,
+        volatility_8,
+        volatility_16,
+        volatility_32,
+        relative_volume,
+        position_16,
+        position_32,
+    ]
+
+    frame = np.column_stack([series.to_numpy() for series in feature_series])
 
     future_return = close.shift(-INTRADAY_HORIZON_BARS) / close - 1
-    rolling_vol = log_return.rolling(32, min_periods=16).std()
-    threshold = np.maximum(rolling_vol.fillna(0.0).to_numpy(), 0.0025)
+    threshold = np.maximum(volatility_32.fillna(0.0).to_numpy(), 0.0025)
 
     future_values = future_return.to_numpy()
     target = np.full(len(data), np.nan)
@@ -162,6 +196,7 @@ def main() -> None:
     print(f"Activo: {TICKER}")
     print(f"Datos: {INTRADAY_PERIOD} | {INTRADAY_INTERVAL}")
     print(f"Patrón observado: últimas {LOOKBACK_BARS} velas")
+    print("Información por vela: estructura + tendencia + momentum + volatilidad + volumen")
     print(f"Horizonte: {INTRADAY_HORIZON_BARS} velas")
     print("Arquitectura: 256 → 128 → 64 neuronas")
     print("Validación: 4 bloques temporales fuera de muestra")
