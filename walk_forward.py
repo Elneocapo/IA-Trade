@@ -5,7 +5,11 @@ from __future__ import annotations
 import pandas as pd
 from sklearn.metrics import balanced_accuracy_score
 
-from evaluation import count_trades, simulate_probability_strategy
+from evaluation import (
+    count_trades,
+    simulate_fixed_horizon_strategy,
+    simulate_probability_strategy,
+)
 from ml_model import FEATURES, build_model, prepare_ml_data
 
 
@@ -19,13 +23,16 @@ def run_walk_forward(
     test_size: int = 63,
     entry_threshold: float = ENTRY_THRESHOLD,
     exit_threshold: float = EXIT_THRESHOLD,
+    horizon_bars: int = 1,
 ) -> tuple[pd.DataFrame, dict]:
     """Entrena en bloques históricos y prueba siempre en datos posteriores.
 
-    Además de la rentabilidad, recoge métricas de calidad probabilística para
-    saber si el modelo tiene señal real o simplemente parece confiado.
+    ``horizon_bars`` define tanto la etiqueta futura como, cuando es mayor que
+    1, la duración de la posición. Así evitamos que el modelo prediga un
+    horizonte corto mientras la estrategia mantiene una operación mucho más
+    tiempo.
     """
-    clean = prepare_ml_data(data)
+    clean = prepare_ml_data(data, horizon_bars=horizon_bars)
     predictions = []
     feature_importances = []
     window_stats = []
@@ -69,12 +76,20 @@ def run_walk_forward(
         )
 
     probability_series = pd.concat(predictions).sort_index()
-    results = simulate_probability_strategy(
-        clean,
-        probability_series,
-        entry_threshold=entry_threshold,
-        exit_threshold=exit_threshold,
-    )
+    if horizon_bars == 1:
+        results = simulate_probability_strategy(
+            clean,
+            probability_series,
+            entry_threshold=entry_threshold,
+            exit_threshold=exit_threshold,
+        )
+    else:
+        results = simulate_fixed_horizon_strategy(
+            clean,
+            probability_series,
+            horizon_bars=horizon_bars,
+            entry_threshold=entry_threshold,
+        )
 
     targets = clean.loc[probability_series.index, "target"].astype(int)
     predicted_direction = (probability_series >= 0.5).astype(int)
@@ -105,6 +120,7 @@ def run_walk_forward(
         "windows": len(predictions),
         "entry_threshold": entry_threshold,
         "exit_threshold": exit_threshold,
+        "horizon_bars": horizon_bars,
         "average_confidence_pct": confidence,
         "days_in_market_pct": days_in_market,
         "window_stats": window_stats,
