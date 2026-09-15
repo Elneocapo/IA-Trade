@@ -7,7 +7,6 @@ Todo es investigación histórica y simulación, sin broker.
 
 from __future__ import annotations
 
-import copy
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.metrics import balanced_accuracy_score
@@ -19,10 +18,13 @@ from market import download_market_data
 
 LOOKBACK_BARS = 32
 MIN_MOVE_RETURN = 0.003
-TRAIN_FRACTION = 0.70          # 70% para aprender
-VALIDATION_FRACTION = 0.15     # solo dentro del 70% de entrenamiento
-TRAIN_EPOCHS = 250
-TRAIN_PATIENCE = 35
+TRAIN_FRACTION = 0.70
+VALIDATION_FRACTION = 0.15
+
+# Antes: 250 épocas / 35 de paciencia.
+# Ahora: 750 épocas / 105 de paciencia = triple de tiempo de aprendizaje.
+TRAIN_EPOCHS = 750
+TRAIN_PATIENCE = 105
 
 ENTRY_UP_PROBABILITY = 0.55
 EXIT_DOWN_PROBABILITY = 0.50
@@ -60,7 +62,7 @@ def build_sequences(data):
 
     frame = np.column_stack([f.to_numpy() for f in features])
     future_return = (close.shift(-INTRADAY_HORIZON_BARS) / close - 1).to_numpy()
-    volatility = features[13].to_numpy()  # volatility_32
+    volatility = features[13].to_numpy()
 
     sequences, targets, indices = [], [], []
     for end in range(LOOKBACK_BARS - 1, len(data) - INTRADAY_HORIZON_BARS):
@@ -115,7 +117,7 @@ def train_network(X_train, y_train):
     best_intercepts = None
     patience = 0
 
-    print("Entrenando... el TEST FINAL permanece completamente oculto.")
+    print("Entrenando 3x más tiempo... el TEST FINAL permanece completamente oculto.")
     for epoch in range(1, TRAIN_EPOCHS + 1):
         model.fit(X_fit_scaled, y_fit)
         loss = model.loss_
@@ -175,11 +177,12 @@ def simulate_strategy(close, probabilities):
 
 
 def main():
-    print("=== IA-Trade | ENTRENAMIENTO LARGO -> EXAMEN FINAL ===")
+    print("=== IA-Trade | ENTRENAMIENTO 3X MÁS LARGO -> EXAMEN FINAL ===")
     print(f"Activo: {TICKER}")
     print(f"Datos: {INTRADAY_PERIOD} | {INTRADAY_INTERVAL}")
     print(f"Patrón: últimas {LOOKBACK_BARS} velas | horizonte: {INTRADAY_HORIZON_BARS} velas")
     print("Plan: 70% histórico para entrenar + 30% final totalmente oculto")
+    print("Entrenamiento máximo: 750 épocas (antes 250)")
     print("El test final NO participa en el entrenamiento ni en la selección de época.")
     print("Modo: SIMULACIÓN / sin broker")
     print()
@@ -201,7 +204,6 @@ def main():
 
     model, scaler, losses, val_scores, best_val = train_network(X_train, y_train)
 
-    # SOLO AHORA se toca el tramo final.
     X_test_scaled = scaler.transform(X_test.reshape(len(X_test), -1))
     probabilities_raw = model.predict_proba(X_test_scaled)
     probabilities = np.zeros((len(X_test), 3))
@@ -241,7 +243,7 @@ def main():
     plt.plot(val_scores, label="Validación temporal")
     plt.xlabel("Época")
     plt.ylabel("Valor")
-    plt.title("Entrenamiento largo y validación temporal")
+    plt.title("Entrenamiento 3x más largo y validación temporal")
     plt.legend()
     plt.grid(True, alpha=0.25)
     plt.tight_layout()
