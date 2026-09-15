@@ -42,8 +42,12 @@ FEATURES = [
     "day_of_week",
 ]
 
-ACTIONABLE_MOVE_MULTIPLIER = 0.5
-MIN_ACTIONABLE_MOVE = 0.002  # 0.2%
+# Exigimos que SUBE/BAJA represente un movimiento suficientemente grande.
+# La prueba anterior con 0.5x volatilidad producía demasiados objetivos que
+# apenas se diferenciaban de ruido. Esta versión es deliberadamente más
+# estricta para comprobar si existe señal cuando el movimiento importa.
+ACTIONABLE_MOVE_MULTIPLIER = 1.0
+MIN_ACTIONABLE_MOVE = 0.003  # 0.3%
 
 
 @dataclass
@@ -127,8 +131,8 @@ def prepare_ml_data(data: pd.DataFrame, horizon_bars: int = 1) -> pd.DataFrame:
     """Prepara features y objetivo futuro de tres clases.
 
     1 = subida accionable, 0 = movimiento sin ventaja clara, -1 = bajada
-    accionable. El modelo aprende así a distinguir una subida de una simple
-    ausencia de movimiento y de una bajada.
+    accionable. El umbral exige un movimiento proporcional a la volatilidad
+    reciente para que el modelo no aprenda simplemente el ruido de mercado.
     """
     if horizon_bars < 1:
         raise ValueError("horizon_bars debe ser >= 1.")
