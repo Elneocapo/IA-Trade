@@ -11,7 +11,7 @@ from evaluation import (
     simulate_fixed_horizon_strategy,
     simulate_probability_strategy,
 )
-from ml_model import FEATURES, build_model, prepare_ml_data
+from ml_model import FEATURES, build_model, prepare_binary_ml_data, prepare_ml_data
 
 
 ENTRY_THRESHOLD = 0.58
@@ -75,6 +75,75 @@ def _confidence_bins(predictions: pd.DataFrame, data: pd.DataFrame, horizon_bars
             }
         )
     return result
+
+
+def run_directional_walk_forward(
+    data: pd.DataFrame,
+    train_size: int = 252,
+    test_size: int = 63,
+    horizon_bars: int = 1,
+) -> dict:
+    """Diagnóstico binario: solo SUBE vs BAJA en movimientos accionables.
+
+    Los NEUTRO se eliminan antes de dividir en bloques. La evaluación sigue
+    siendo estrictamente cronológica y no modifica la estrategia principal.
+    """
+    clean = prepare_binary_ml_data(data, horizon_bars=horizon_bars)
+    predictions = []
+    window_stats = []
+
+    start = 0
+    while start + train_size + test_size <= len(clean):
+        train = clean.iloc[start : start + train_size]
+        test = clean.iloc[start + train_size : start + train_size + test_size]
+
+        model = build_model()
+        model.fit(train[FEATURES], train["target"].astype(int))
+        predicted = model.predict(test[FEATURES])
+        probabilities = model.predict_proba(test[FEATURES])
+        classes = {int(cls): i for i, cls in enumerate(model.classes_)}
+        p_up = probabilities[:, classes[1]] if 1 in classes else np.zeros(len(test))
+
+        predictions.append(
+            pd.DataFrame(
+                {"target": test["target"].astype(int), "prediction": predicted, "probability_up": p_up},
+                index=test.index,
+            )
+        )
+        window_stats.append(
+            float(balanced_accuracy_score(test["target"].astype(int), predicted) * 100)
+        )
+        start += test_size
+
+    if not predictions:
+        raise ValueError(
+            "No hay suficientes movimientos accionables para el diagnóstico binario."
+        )
+
+    frame = pd.concat(predictions).sort_index()
+    accuracy = float((frame["prediction"] == frame["target"]).mean() * 100)
+    balanced_accuracy = float(
+        balanced_accuracy_score(frame["target"], frame["prediction"]) * 100
+    )
+    up_rate = float((frame["target"] == 1).mean() * 100)
+    baseline_accuracy = max(up_rate, 100 - up_rate)
+    brier = float(np.mean((frame["probability_up"] - frame["target"]) ** 2))
+    binary_log_loss = float(
+        log_loss(frame["target"], frame["probability_up"], labels=[0, 1])
+    )
+
+    return {
+        "samples": len(frame),
+        "windows": len(predictions),
+        "accuracy_pct": accuracy,
+        "balanced_accuracy_pct": balanced_accuracy,
+        "baseline_accuracy_pct": baseline_accuracy,
+        "target_up_rate_pct": up_rate,
+        "brier_score": brier,
+        "log_loss": binary_log_loss,
+        "mean_probability_up_pct": float(frame["probability_up"].mean() * 100),
+        "window_balanced_accuracy_pct": window_stats,
+    }
 
 
 def run_walk_forward(
