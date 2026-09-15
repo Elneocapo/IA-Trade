@@ -18,6 +18,7 @@ from config import (
 from baseline_experiment import run_baseline_experiment
 from evaluation import buy_and_hold_curve, summarize_values
 from market import download_market_data
+from regime_experiment import run_regime_experiment
 from walk_forward import (
     run_directional_walk_forward,
     run_expanding_temporal_experiment,
@@ -137,6 +138,40 @@ def print_baseline_experiment(ticker: str, stats: dict) -> None:
     )
 
 
+def print_regime_experiment(ticker: str, stats: dict) -> None:
+    print("=== EXPERIMENTO DE REGÍMENES | ¿DÓNDE FUNCIONA LA SEÑAL? ===")
+    print(f"Activo:                 {ticker}")
+    print(f"Horizonte:              {stats['horizon']} barra")
+    print("Clases:                 SUBE vs BAJA (NEUTRO excluido)")
+    print("Regímenes:              ALCISTA / LATERAL / BAJISTA")
+    print("Validación:             4 bloques temporales consecutivos")
+    print("Test final:             último bloque, reservado")
+    print()
+    print("Fold | Régimen  | N | RF balanced | Momentum balanced | Mayoritaria balanced")
+    for fold in stats["folds"]:
+        for regime, values in fold["regimes"].items():
+            print(
+                f"{fold['fold']:>4} | {regime:<8} | {values['model']['samples']:>3} | "
+                f"{values['model']['balanced_accuracy_pct']:>11.2f}% | "
+                f"{values['momentum']['balanced_accuracy_pct']:>18.2f}% | "
+                f"{values['majority']['balanced_accuracy_pct']:>20.2f}%"
+            )
+    print()
+    print("TEST FINAL POR RÉGIMEN")
+    for regime, values in stats["final_test"].items():
+        print(
+            f"{regime:<8} | N {values['model']['samples']:>2} | "
+            f"RF {values['model']['balanced_accuracy_pct']:.2f}% | "
+            f"Momentum {values['momentum']['balanced_accuracy_pct']:.2f}% | "
+            f"Mayoritaria {values['majority']['balanced_accuracy_pct']:.2f}%"
+        )
+    print(
+        f"Test final global: {stats['final_test_start'].date()} -> "
+        f"{stats['final_test_end'].date()} | {stats['final_test_samples']} muestras"
+    )
+    print("Lectura: buscamos un régimen donde la IA supere a las reglas simples de forma repetible, no solo en un fold.")
+
+
 def print_report(label: str, ticker: str, data, results, wf_stats) -> None:
     ia_stats = summarize_values(results["portfolio_value"])
     hold_data = data.loc[results.index[0] : results.index[-1]]
@@ -237,6 +272,12 @@ def main() -> None:
         print_baseline_experiment(TICKER, baseline_stats)
     except ValueError as error:
         print(f"\nNo se pudo ejecutar el experimento de baselines: {error}")
+
+    try:
+        regime_stats = run_regime_experiment(horizon_data, horizon_bars=1)
+        print_regime_experiment(TICKER, regime_stats)
+    except ValueError as error:
+        print(f"\nNo se pudo ejecutar el experimento de regímenes: {error}")
 
     print("\n=== VALIDACIÓN MULTIACTIVO | MISMA IA, SIN AJUSTAR UMBRALES ===")
     for ticker in VALIDATION_TICKERS:
