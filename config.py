@@ -15,6 +15,9 @@ INTRADAY_PERIOD = "60d"
 INTRADAY_INTERVAL = "15m"
 INTRADAY_TRAIN_SIZE = 500
 INTRADAY_TEST_SIZE = 100
+# 4 velas de 15m = 1 hora. El modelo y la estrategia intradía usan este mismo
+# horizonte para que la predicción y la duración de la operación estén alineadas.
+INTRADAY_HORIZON_BARS = 4
 
 INITIAL_CASH = 50.0
 COMMISSION = 0.001  # 0.1% simulada por operación
