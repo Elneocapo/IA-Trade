@@ -32,14 +32,10 @@ def build_features(data):
     low = data["Low"].astype(float)
     volume = data["Volume"].astype(float).replace(0, np.nan)
     ret = np.log(close / close.shift(1)).replace([np.inf, -np.inf], np.nan)
-    f = [
-        ret,
-        (high - low) / close,
-        (close - op) / close,
-        (high - np.maximum(op, close)) / close,
-        (np.minimum(op, close) - low) / close,
-        np.log(volume / volume.shift(1)).replace([np.inf, -np.inf], np.nan),
-    ]
+    f = [ret, (high - low) / close, (close - op) / close,
+         (high - np.maximum(op, close)) / close,
+         (np.minimum(op, close) - low) / close,
+         np.log(volume / volume.shift(1)).replace([np.inf, -np.inf], np.nan)]
     ema8 = close.ewm(span=8, adjust=False).mean()
     ema21 = close.ewm(span=21, adjust=False).mean()
     f += [close / ema8 - 1, close / ema21 - 1, ema8 / ema21 - 1]
@@ -91,19 +87,9 @@ def train_network(fit_X, fit_y, val_sets):
     X_fit = scaler.fit_transform(X_fit)
     val_scaled = [(scaler.transform(X.reshape(len(X), -1)), y) for X, y, _ in val_sets]
 
-    model = MLPClassifier(
-        hidden_layer_sizes=(128, 64),
-        activation="relu",
-        solver="adam",
-        alpha=0.01,
-        batch_size=128,
-        learning_rate_init=0.0005,
-        max_iter=1,
-        warm_start=True,
-        shuffle=True,
-        random_state=42,
-    )
-
+    model = MLPClassifier(hidden_layer_sizes=(128, 64), activation="relu", solver="adam",
+                          alpha=0.01, batch_size=128, learning_rate_init=0.0005,
+                          max_iter=1, warm_start=True, shuffle=True, random_state=42)
     losses, val_losses, val_scores = [], [], []
     best_score = -np.inf
     best_weights = None
@@ -112,15 +98,14 @@ def train_network(fit_X, fit_y, val_sets):
     print(f"Entrenando {TRAIN_EPOCHS} épocas...")
     for epoch in range(1, TRAIN_EPOCHS + 1):
         model.fit(X_fit, fit_y)
-        per_asset_loss = []
-        per_asset_score = []
+        asset_losses, asset_scores = [], []
         for Xv, yv in val_scaled:
             p = model.predict_proba(Xv)[:, 1]
-            p_clip = np.clip(p, 1e-7, 1 - 1e-7)
-            per_asset_loss.append(float(-np.mean(yv * np.log(p_clip) + (1 - yv) * np.log(1 - p_clip))))
-            per_asset_score.append(balanced_accuracy(yv, p))
-        score = float(np.mean(per_asset_score))
-        val_loss = float(np.mean(per_asset_loss))
+            pc = np.clip(p, 1e-7, 1 - 1e-7)
+            asset_losses.append(float(-np.mean(yv * np.log(pc) + (1 - yv) * np.log(1 - pc))))
+            asset_scores.append(balanced_accuracy(yv, p))
+        score = float(np.mean(asset_scores))
+        val_loss = float(np.mean(asset_losses))
         losses.append(float(model.loss_))
         val_losses.append(val_loss)
         val_scores.append(score)
@@ -170,9 +155,7 @@ def choose_strategy(val_results):
     best = None
     for threshold in np.arange(0.50, 0.66, 0.02):
         for hold in (1, 2, 4, 6, 8):
-            returns = []
-            total_trades = 0
-            total_bars = 0
+            returns, total_trades, total_bars = [], 0, 0
             for _, close, prob in val_results:
                 value, trades, _ = simulate(close, prob, float(threshold), hold)
                 returns.append(value / INITIAL_CASH - 1)
@@ -180,10 +163,8 @@ def choose_strategy(val_results):
                 total_bars += len(close)
             avg_return = float(np.mean(returns))
             ops_day = total_trades / max(total_bars / 26, 1)
-            # Solo una pequeña preferencia por una frecuencia útil, sin forzar operaciones.
             penalty = max(0.0, 2.0 - ops_day) * 0.002 + max(0.0, ops_day - 8.0) * 0.002
-            objective = avg_return - penalty
-            candidate = (objective, avg_return, float(threshold), hold, ops_day)
+            candidate = (avg_return - penalty, avg_return, float(threshold), hold, ops_day)
             if best is None or candidate > best:
                 best = candidate
     return best
@@ -206,15 +187,11 @@ def main():
         datasets[asset] = (data, X, y, idx)
         print(f"  {asset}: {len(X)} secuencias | subida={y.mean() * 100:.1f}%")
 
-    # 30% final de AAPL: reservado desde el principio.
     test_data, test_X, test_y, test_idx = datasets[TEST_ASSET]
     blind_start = int(len(test_X) * TRAIN_FRACTION)
-    blind_X = test_X[blind_start:]
-    blind_y = test_y[blind_start:]
-    blind_idx = test_idx[blind_start:]
+    blind_X, blind_y, blind_idx = test_X[blind_start:], test_y[blind_start:], test_idx[blind_start:]
 
-    fit_X, fit_y = [], []
-    val_sets = []
+    fit_X, fit_y, val_sets = [], [], []
     for asset, (data, X, y, idx) in datasets.items():
         train_end = int(len(X) * TRAIN_FRACTION)
         val_start = int(train_end * (1 - VALIDATION_FRACTION))
@@ -224,18 +201,16 @@ def main():
         val_close = data.loc[val_idx, "Close"].astype(float)
         val_sets.append((X[val_start:train_end], y[val_start:train_end], val_close))
 
-    X_fit = np.concatenate(fit_X, axis=0)
-    y_fit = np.concatenate(fit_y, axis=0)
+    X_fit, y_fit = np.concatenate(fit_X, axis=0), np.concatenate(fit_y, axis=0)
     print(f"\nMuestras entrenamiento: {len(X_fit)}")
-    print(f"Muestras validación por activo: {sum(len(x[0]) for x in val_sets)}")
+    print(f"Muestras validación por activo: {sum(len(v[0]) for v in val_sets)}")
     print(f"Muestras TEST FINAL AAPL: {len(blind_X)}")
 
     model, scaler, losses, val_losses, val_scores, best_score = train_network(X_fit, y_fit, val_sets)
 
-    # Elegimos la estrategia sobre validación temporal, no sobre AAPL ciego.
+    # La validación se mantiene separada por activo para elegir la estrategia.
     val_results = []
-    for asset, (_, X, _, idx) in zip(datasets.keys(), val_sets):
-        val_X_asset, _, val_close = idx
+    for asset, (val_X_asset, _, val_close) in zip(datasets.keys(), val_sets):
         prob = model.predict_proba(scaler.transform(val_X_asset.reshape(len(val_X_asset), -1)))[:, 1]
         val_results.append((asset, val_close, prob))
 
