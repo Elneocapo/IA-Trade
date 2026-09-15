@@ -4,6 +4,10 @@ El proyecto arranca en modo simulación: nunca envía órdenes reales.
 """
 
 TICKER = "AAPL"
+# Activos adicionales para comprobar si la señal se generaliza o solo funciona
+# accidentalmente en un único activo. No se cambia el modelo ni los umbrales.
+VALIDATION_TICKERS = ("AAPL", "MSFT", "SPY", "NVDA")
+
 # Más historial para que el walk-forward diario tenga muchas ventanas de prueba.
 PERIOD = "5y"
 INTERVAL = "1d"
