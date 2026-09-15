@@ -33,13 +33,13 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      - name: Ejecutar investigación
+      - name: Ejecutar investigación v9
         run: |
-          python pattern_ml_backtest_v8.py | tee result.txt
+          python v9_1h_0957_hypothesis.py | tee result.txt
 
       - name: Guardar resultados
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ia-trade-result
+          name: ia-trade-result-v9
           path: result.txt
