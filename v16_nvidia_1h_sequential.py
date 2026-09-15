@@ -1,8 +1,14 @@
-"""IA-Trade V16.6 - NVDA only, sequential 1H next-candle prediction.
+"""IA-Trade V16.7 - NVDA only, sequential 1H next-candle prediction.
 
 Paper trading / research only. No broker or live orders.
 Each prediction uses only information available at the current hourly close.
 The final test period is never used for parameter selection.
+
+V16.7 change from V16.6:
+- allows shorter maximum holding periods (4/6/8/10/13 bars)
+- tests a wider threshold range, including lower thresholds
+- keeps model/features/walk-forward structure unchanged
+Goal: investigate whether V16.6's low trade frequency is unnecessarily restrictive.
 """
 from __future__ import annotations
 import time, warnings
@@ -16,10 +22,12 @@ ASSET="NVDA"; PERIOD="2y"; INTERVAL="1h"
 LOOKBACK_BARS=65; MAX_HOLD_BARS=13
 TRAIN_WINDOW=1200; RETRAIN_EVERY=24; MODEL_MAX_ITER=140
 COST=0.001; INITIAL_CASH=50.0
+HOLD_CANDIDATES=(4,6,8,10,13)
+THRESHOLD_CANDIDATES=(-0.0015,-0.00125,-0.001,-0.00075,-0.0005,-0.00025,0,0.00025,0.0005,0.00075,0.001,0.00125,0.0015,0.00175,0.002,0.0025,0.003,0.004)
 
 
 def load_data():
-    print(f"=== V16.6 | {ASSET} | {INTERVAL} | context={LOOKBACK_BARS} bars | max hold={MAX_HOLD_BARS} bars ===",flush=True)
+    print(f"=== V16.7 | {ASSET} | {INTERVAL} | context={LOOKBACK_BARS} bars | hold candidates={HOLD_CANDIDATES} ===",flush=True)
     df=yf.download(ASSET,period=PERIOD,interval=INTERVAL,auto_adjust=True,progress=False,prepost=False)
     if df.empty: raise RuntimeError(f"No data returned for {ASSET}")
     if isinstance(df.columns,pd.MultiIndex): df.columns=df.columns.get_level_values(0)
@@ -80,19 +88,19 @@ def sequential_predictions(df,split_start,split_end):
     return pd.DataFrame(out,columns=["date","price","pred1","pred3","pred6","prob_up","signal","trend","vol_ratio"]).set_index("date")
 
 
-def backtest(df,panel,start,end,threshold,max_weight,trend_filter,vol_filter):
+def backtest(df,panel,start,end,threshold,max_weight,trend_filter,vol_filter,max_hold):
     dates=[d for d in panel.index if start<=d<end]; cash,shares=INITIAL_CASH,0.; entry=None; curve=[]; trs=[]; entry_value=None
     for i,d in enumerate(dates):
         row=panel.loc[d]; price=float(row.price); total=cash+shares*price; signal=float(row.signal)>threshold
         if trend_filter and float(row.trend)<=0: signal=False
         if vol_filter and float(row.vol_ratio)>1.9: signal=False
-        target=max_weight if signal else 0.;
-        if shares>0 and entry is not None and i-entry>=MAX_HOLD_BARS: target=0.
+        target=max_weight if signal else 0.
+        if shares>0 and entry is not None and i-entry>=max_hold: target=0.
         tv=target*total; cur=shares*price
         if tv<cur*.98 and cur>0:
             sell=cur-tv; cash+=sell*(1-COST); shares-=sell/price
             if shares<=1e-12:
-                shares=0.;
+                shares=0.
                 if entry_value is not None: trs.append(total/entry_value-1)
                 entry=None; entry_value=None
         elif tv>cur*1.02:
@@ -120,16 +128,19 @@ def main():
     if panel.empty: raise RuntimeError("Could not generate sequential predictions")
     val=panel.index[panel.index<df.index[val_cut]]; test=panel.index[panel.index>=df.index[test_start]]; vs,ve=val[0],val[-1]; ts,te=test[0],test[-1]
     candidates=[]
-    for threshold in (-.0005,0,.00025,.0005,.00075,.001,.00125,.0015,.00175,.002,.0025,.003,.004):
+    for threshold in THRESHOLD_CANDIDATES:
         for weight in (.25,.35,.50,.70,.90,1.):
-            for tf in (False,True):
-                for vf in (False,True):
-                    r,tr,dd,sh,wr,_=backtest(df,panel,vs,ve,threshold,weight,tf,vf); score=r-.32*abs(min(dd,0))+.018*max(sh,0)
-                    if tr<10: score-=.006*(10-tr)
-                    if wr<.42 and tr>=10: score-=.01*(.42-wr)
-                    candidates.append((score,r,threshold,weight,tf,vf,tr,dd,sh,wr))
-    _,vr,threshold,weight,tf,vf,vt,vdd,vsh,vwr=max(candidates,key=lambda x:x[0]); fr,ft,fdd,fsh,fwr,final_cash=backtest(df,panel,ts,te,threshold,weight,tf,vf)
+            for max_hold in HOLD_CANDIDATES:
+                for tf in (False,True):
+                    for vf in (False,True):
+                        r,tr,dd,sh,wr,_=backtest(df,panel,vs,ve,threshold,weight,tf,vf,max_hold)
+                        score=r-.32*abs(min(dd,0))+.018*max(sh,0)
+                        if tr<10: score-=.006*(10-tr)
+                        if wr<.42 and tr>=10: score-=.01*(.42-wr)
+                        candidates.append((score,r,threshold,weight,max_hold,tf,vf,tr,dd,sh,wr))
+    _,vr,threshold,weight,max_hold,tf,vf,vt,vdd,vsh,vwr=max(candidates,key=lambda x:x[0])
+    fr,ft,fdd,fsh,fwr,final_cash=backtest(df,panel,ts,te,threshold,weight,tf,vf,max_hold)
     bh=buy_and_hold(df,ts,te); bh_cash=INITIAL_CASH*(1+bh); elapsed=time.time()-overall
-    print("\n=== V16.6 NVDA SEQUENTIAL 1H SUMMARY ==="); print(f"asset={ASSET} | candles={INTERVAL} | history={PERIOD}"); print(f"context={LOOKBACK_BARS} bars (~10 trading days) | prediction=NEXT 1H candle | max_hold={MAX_HOLD_BARS} bars (~2 trading days)"); print(f"data={df.index[0]} -> {df.index[-1]} | total_bars={len(df)}"); print(f"validation={vs} -> {ve} | test={ts} -> {te}"); print(f"test duration={duration_text(ts,te)}"); print(f"selected threshold={threshold:.2%} | max_weight={weight:.0%} | trend_filter={tf} | vol_filter={vf}"); print(f"validation IA={vr:+.2%} | DD={vdd:.2%} | Sharpe={vsh:.2f} | trades={vt} | win_rate={vwr:.1%}"); print(f"FINAL IA={fr:+.2%} | {ASSET} B&H={bh:+.2%} | trades={ft} | maxDD={fdd:.2%} | Sharpe={fsh:.2f} | win_rate={fwr:.1%}"); print(f"€{INITIAL_CASH:.2f} -> IA €{final_cash:.2f} | profit/loss={final_cash-INITIAL_CASH:+.2f}€"); print(f"€{INITIAL_CASH:.2f} -> B&H €{bh_cash:.2f} | profit/loss={bh_cash-INITIAL_CASH:+.2f}€"); print(f"IA beats {ASSET} B&H: {'YES' if fr>bh else 'NO'}"); print(f"runtime={elapsed/60:.1f} min")
+    print("\n=== V16.7 NVDA SEQUENTIAL 1H SUMMARY ==="); print(f"asset={ASSET} | candles={INTERVAL} | history={PERIOD}"); print(f"context={LOOKBACK_BARS} bars (~10 trading days) | prediction=NEXT 1H candle"); print(f"max_hold selected={max_hold} bars (~{max_hold/6.5:.1f} trading days)"); print(f"data={df.index[0]} -> {df.index[-1]} | total_bars={len(df)}"); print(f"validation={vs} -> {ve} | test={ts} -> {te}"); print(f"test duration={duration_text(ts,te)}"); print(f"selected threshold={threshold:.2%} | max_weight={weight:.0%} | trend_filter={tf} | vol_filter={vf}"); print(f"validation IA={vr:+.2%} | DD={vdd:.2%} | Sharpe={vsh:.2f} | trades={vt} | win_rate={vwr:.1%}"); print(f"FINAL IA={fr:+.2%} | {ASSET} B&H={bh:+.2%} | trades={ft} | maxDD={fdd:.2%} | Sharpe={fsh:.2f} | win_rate={fwr:.1%}"); print(f"€{INITIAL_CASH:.2f} -> IA €{final_cash:.2f} | profit/loss={final_cash-INITIAL_CASH:+.2f}€"); print(f"€{INITIAL_CASH:.2f} -> B&H €{bh_cash:.2f} | profit/loss={bh_cash-INITIAL_CASH:+.2f}€"); print(f"IA beats {ASSET} B&H: {'YES' if fr>bh else 'NO'}"); print(f"runtime={elapsed/60:.1f} min")
 
 if __name__=="__main__": main()
