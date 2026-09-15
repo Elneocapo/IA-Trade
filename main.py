@@ -5,7 +5,6 @@ investigación intradía. Todo sigue siendo simulación: no conecta con brokers.
 """
 
 from config import (
-    INITIAL_CASH,
     INTERVAL,
     INTRADAY_HORIZON_BARS,
     INTRADAY_INTERVAL,
@@ -33,20 +32,24 @@ def print_report(label: str, data, results, wf_stats) -> None:
     )
     print(f"Ventanas walk-forward:  {wf_stats['windows']}")
     print(f"Horizonte objetivo:     {wf_stats['horizon_bars']} barras")
-    print(f"Entrada por confianza:  >= {wf_stats['entry_threshold']:.2f}")
+    print(f"Entrada por P(subida):  >= {wf_stats['entry_threshold']:.2f}")
     if wf_stats["horizon_bars"] == 1:
-        print(f"Salida por confianza:   <  {wf_stats['exit_threshold']:.2f}")
+        print(f"Salida por P(subida):   <  {wf_stats['exit_threshold']:.2f}")
     else:
         print("Salida:                 horizonte fijo")
+    print("Objetivo ML:            SUBE / NEUTRO / BAJA")
     print(f"Capital inicial:        {ia_stats['initial_value']:.2f} €")
     print(f"Valor final IA:         {ia_stats['final_value']:.2f} €")
     print(f"Rentabilidad IA:        {ia_stats['return_pct']:.2f} %")
     print(f"Máximo drawdown IA:     {ia_stats['max_drawdown_pct']:.2f} %")
     print(f"Acierto objetivo:       {wf_stats['accuracy_pct']:.2f} %")
     print(f"Balanced accuracy:      {wf_stats['balanced_accuracy_pct']:.2f} %")
-    print(f"Objetivos alcistas:     {wf_stats['target_positive_rate_pct']:.2f} %")
-    print(f"Brier score:            {wf_stats['brier_score']:.4f}")
-    print(f"Confianza media:        {wf_stats['average_confidence_pct']:.2f} %")
+    print(f"Objetivos SUBE:         {wf_stats['target_up_rate_pct']:.2f} %")
+    print(f"Objetivos NEUTRO:       {wf_stats['target_neutral_rate_pct']:.2f} %")
+    print(f"Objetivos BAJA:         {wf_stats['target_down_rate_pct']:.2f} %")
+    print(f"Brier multiclass:       {wf_stats['brier_score']:.4f}")
+    print(f"Log-loss multiclass:    {wf_stats['multiclass_log_loss']:.4f}")
+    print(f"P(subida) media:        {wf_stats['average_confidence_pct']:.2f} %")
     print(f"Días/barras invertido:  {wf_stats['days_in_market_pct']:.2f} %")
     print(f"Cambios de posición:    {wf_stats['trades']}")
     print(f"Valor final Buy&Hold:   {hold_stats['final_value']:.2f} €")
@@ -55,7 +58,7 @@ def print_report(label: str, data, results, wf_stats) -> None:
 
     print("=== Señales que más usa el modelo ===")
     for feature, importance in wf_stats["top_features"].items():
-        print(f"{feature:<24} {importance:.3f}")
+        print(f"{feature:<28} {importance:.3f}")
 
     advantage = ia_stats["final_value"] - hold_stats["final_value"]
     if advantage > 0:
