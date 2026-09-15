@@ -371,17 +371,19 @@ def main() -> None:
 
 
 def _copy_output_to_clipboard(output: str) -> bool:
-    """Copia todo el output de la ejecución al portapapeles de Windows."""
+    """Copia todo el output al portapapeles usando la utilidad nativa de Windows."""
     try:
-        import tkinter as tk
+        import subprocess
 
-        root = tk.Tk()
-        root.withdraw()
-        root.clipboard_clear()
-        root.clipboard_append(output)
-        root.update()
-        root.destroy()
-        return True
+        result = subprocess.run(
+            ["clip"],
+            input=output,
+            text=True,
+            encoding="utf-16le",
+            errors="replace",
+            check=False,
+        )
+        return result.returncode == 0
     except Exception:
         return False
 
