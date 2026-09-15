@@ -4,7 +4,8 @@ El proyecto arranca en modo simulación: nunca envía órdenes reales.
 """
 
 TICKER = "AAPL"
-PERIOD = "2y"
+# Más historial para que el walk-forward tenga muchas más ventanas de prueba.
+PERIOD = "5y"
 INTERVAL = "1d"
 INITIAL_CASH = 50.0
 COMMISSION = 0.001  # 0.1% simulada por operación
