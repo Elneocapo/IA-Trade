@@ -24,8 +24,11 @@ from market import download_market_data
 
 LOOKBACK_BARS = 32
 TRAIN_FRACTION = 0.70
-ENTRY_PROBABILITY = 0.60
-EXIT_PROBABILITY = 0.45
+
+# Buscamos una estrategia de mayor frecuencia. La red decide, pero no exigimos
+# una probabilidad tan alta que termine haciendo solo unas pocas operaciones.
+ENTRY_PROBABILITY = 0.54
+EXIT_PROBABILITY = 0.50
 
 
 def build_sequences(data):
@@ -34,14 +37,14 @@ def build_sequences(data):
     open_price = data["Open"].astype(float)
     high = data["High"].astype(float)
     low = data["Low"].astype(float)
-    volume = data["Volume"].astype(float)
+    volume = data["Volume"].astype(float).replace(0, np.nan)
 
+    # log1p de cambios de volumen evita log(0) y mantiene el cálculo estable.
     log_return = np.log(close / close.shift(1)).replace([np.inf, -np.inf], np.nan)
     range_pct = (high - low) / close
     body_pct = (close - open_price) / close
     volume_change = np.log(volume / volume.shift(1)).replace([np.inf, -np.inf], np.nan)
 
-    # Variables relativas para que la red aprenda forma/movimiento y no precio absoluto.
     frame = np.column_stack([
         log_return.to_numpy(),
         range_pct.to_numpy(),
@@ -52,12 +55,13 @@ def build_sequences(data):
     ])
 
     future_return = close.shift(-INTRADAY_HORIZON_BARS) / close - 1
-    # Objetivo binario: subida suficientemente grande vs bajada suficientemente grande.
-    rolling_vol = log_return.rolling(32).std()
-    threshold = np.maximum(rolling_vol * 1.0, 0.0025)
+    rolling_vol = log_return.rolling(32, min_periods=16).std()
+    threshold = np.maximum(rolling_vol.fillna(0.0).to_numpy(), 0.0025)
+
+    future_values = future_return.to_numpy()
     target = np.full(len(data), np.nan)
-    target[future_return.to_numpy() > threshold.to_numpy()] = 1
-    target[future_return.to_numpy() < -threshold.to_numpy()] = 0
+    target[future_values > threshold] = 1
+    target[future_values < -threshold] = 0
 
     sequences = []
     targets = []
@@ -66,7 +70,6 @@ def build_sequences(data):
         window = frame[end - LOOKBACK_BARS + 1:end + 1]
         if not np.isfinite(window).all() or not np.isfinite(target[end]):
             continue
-        # Normalización por secuencia: elimina escala de precio y deja la forma.
         sequences.append(window)
         targets.append(int(target[end]))
         indices.append(data.index[end])
@@ -74,9 +77,7 @@ def build_sequences(data):
     if not sequences:
         raise ValueError("No hay suficientes secuencias limpias para entrenar la IA.")
 
-    X = np.asarray(sequences, dtype=float)
-    y = np.asarray(targets, dtype=int)
-    return X, y, indices
+    return np.asarray(sequences, dtype=float), np.asarray(targets, dtype=int), indices
 
 
 def train_network(X_train, y_train):
@@ -97,10 +98,35 @@ def train_network(X_train, y_train):
         validation_fraction=0.15,
         n_iter_no_change=15,
         random_state=42,
-        verbose=False,
+        verbose=True,
     )
     model.fit(X_scaled, y_train)
     return model, scaler
+
+
+def simulate_strategy(close, p_up):
+    """Simula entradas/salidas frecuentes sin conexión a ningún broker."""
+    cash = INITIAL_CASH
+    position = 0.0
+    equity = []
+    trade_count = 0
+
+    for price, probability in zip(close.to_numpy(), p_up):
+        if position == 0 and probability >= ENTRY_PROBABILITY:
+            position = (cash * (1 - COMMISSION)) / price
+            cash = 0.0
+            trade_count += 1
+        elif position > 0 and probability <= EXIT_PROBABILITY:
+            cash = position * price * (1 - COMMISSION)
+            position = 0.0
+            trade_count += 1
+        equity.append(cash if position == 0 else position * price)
+
+    if position > 0:
+        cash = position * close.iloc[-1] * (1 - COMMISSION)
+        trade_count += 1
+
+    return cash, trade_count, equity
 
 
 def main() -> None:
@@ -112,7 +138,11 @@ def main() -> None:
     print("Modo: SIMULACIÓN / sin broker")
     print()
 
-    data = download_market_data(TICKER, period=INTRADAY_PERIOD, interval=INTRADAY_INTERVAL)
+    data = download_market_data(
+        TICKER,
+        period=INTRADAY_PERIOD,
+        interval=INTRADAY_INTERVAL,
+    )
     X, y, indices = build_sequences(data)
 
     split = int(len(X) * TRAIN_FRACTION)
@@ -123,6 +153,8 @@ def main() -> None:
     print(f"Secuencias totales:      {len(X)}")
     print(f"Entrenamiento:           {len(X_train)}")
     print(f"Test fuera de muestra:   {len(X_test)}")
+    print(f"Entrada IA:              >= {ENTRY_PROBABILITY:.2f}")
+    print(f"Salida IA:               <= {EXIT_PROBABILITY:.2f}")
     print()
     print("Entrenando red neuronal por épocas...")
 
@@ -137,28 +169,8 @@ def main() -> None:
     predictions = (p_up >= 0.5).astype(int)
     balanced = balanced_accuracy_score(y_test, predictions) * 100
 
-    # Simulación sencilla: entrada cuando la confianza es alta y salida cuando cae.
     close = data.loc[test_indices, "Close"].astype(float)
-    entries = p_up >= ENTRY_PROBABILITY
-    exits = p_up < EXIT_PROBABILITY
-
-    cash = INITIAL_CASH
-    position = 0.0
-    equity = []
-    trade_count = 0
-
-    for price, enter, exit_ in zip(close.to_numpy(), entries, exits):
-        if position == 0 and enter:
-            position = (cash * (1 - COMMISSION)) / price
-            cash = 0.0
-            trade_count += 1
-        elif position > 0 and exit_:
-            cash = position * price * (1 - COMMISSION)
-            position = 0.0
-            trade_count += 1
-        equity.append(cash if position == 0 else position * price)
-
-    final_value = equity[-1] if equity else INITIAL_CASH
+    final_value, trade_count, equity = simulate_strategy(close, p_up)
     buy_hold = INITIAL_CASH * (close.iloc[-1] / close.iloc[0])
 
     print()
@@ -167,6 +179,7 @@ def main() -> None:
     print(f"Rentabilidad IA:         {(final_value / INITIAL_CASH - 1) * 100:.2f} %")
     print(f"Buy & Hold final:        {buy_hold:.2f} €")
     print(f"Operaciones:             {trade_count}")
+    print(f"Operaciones/día aprox.:  {trade_count / max(len(close) / 26, 1):.2f}")
     print(f"Balanced accuracy OOS:   {balanced:.2f}%")
 
     if final_value > buy_hold:
@@ -176,7 +189,7 @@ def main() -> None:
 
     print()
     print("--- ENTRENAMIENTO ---")
-    print("Se muestra la evolución de la pérdida de la red durante el entrenamiento.")
+    print("La gráfica muestra cómo evoluciona la pérdida durante las épocas.")
     plt.figure(figsize=(9, 5))
     plt.plot(model.loss_curve_)
     plt.xlabel("Época")
