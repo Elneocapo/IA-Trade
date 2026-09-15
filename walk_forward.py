@@ -46,6 +46,37 @@ def _multiclass_brier(
     )
 
 
+def _confidence_bins(predictions: pd.DataFrame, data: pd.DataFrame, horizon_bars: int) -> list[dict]:
+    """Mide si una P(subida) alta realmente implica mejor resultado futuro."""
+    future_return = data["Close"].shift(-horizon_bars) / data["Close"] - 1
+    frame = predictions.copy()
+    frame["future_return"] = future_return.reindex(frame.index)
+    frame = frame.dropna(subset=["future_return"])
+
+    bins = [0.0, 0.4, 0.5, 0.6, 0.7, 0.8, 1.01]
+    labels = ["<40%", "40-50%", "50-60%", "60-70%", "70-80%", ">=80%"]
+    frame["confidence_bin"] = pd.cut(
+        frame["probability_up"], bins=bins, labels=labels, right=False
+    )
+
+    result = []
+    for label in labels:
+        group = frame[frame["confidence_bin"] == label]
+        if group.empty:
+            continue
+        result.append(
+            {
+                "bin": label,
+                "samples": int(len(group)),
+                "mean_probability_pct": float(group["probability_up"].mean() * 100),
+                "up_rate_pct": float((group["future_return"] > 0).mean() * 100),
+                "mean_future_return_pct": float(group["future_return"].mean() * 100),
+                "median_future_return_pct": float(group["future_return"].median() * 100),
+            }
+        )
+    return result
+
+
 def run_walk_forward(
     data: pd.DataFrame,
     train_size: int = 252,
@@ -155,7 +186,6 @@ def run_walk_forward(
     confidence = float(prediction_frame["probability_up"].mean() * 100)
     days_in_market = float(results["position"].mean() * 100)
 
-    # Log-loss multiclass como métrica adicional de calidad probabilística.
     class_probabilities = prediction_frame[[
         "probability_down",
         "probability_neutral",
@@ -168,6 +198,7 @@ def run_walk_forward(
 
     importances = pd.DataFrame(feature_importances, columns=FEATURES).mean().sort_values(ascending=False)
     top_features = importances.head(8).to_dict()
+    confidence_analysis = _confidence_bins(prediction_frame, clean, horizon_bars)
 
     return results, {
         "accuracy_pct": accuracy,
@@ -190,4 +221,5 @@ def run_walk_forward(
         "days_in_market_pct": days_in_market,
         "window_stats": window_stats,
         "top_features": top_features,
+        "confidence_analysis": confidence_analysis,
     }
