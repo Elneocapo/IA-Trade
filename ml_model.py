@@ -25,10 +25,10 @@ FEATURES = [
     "macd_diff",
 ]
 
-# En vez de preguntar simplemente si la siguiente vela sube 0.01%,
-# buscamos un movimiento que tenga suficiente magnitud para ser interesante.
+# Umbral mínimo para considerar que el movimiento futuro tiene suficiente
+# magnitud para ser interesante después de costes simulados.
 ACTIONABLE_MOVE_MULTIPLIER = 0.5
-MIN_ACTIONABLE_MOVE = 0.002  # 0.2%, aproximación conservadora del coste ida/vuelta.
+MIN_ACTIONABLE_MOVE = 0.002  # 0.2%
 
 
 @dataclass
@@ -71,19 +71,28 @@ def add_ml_features(data: pd.DataFrame) -> pd.DataFrame:
     return result.replace([np.inf, -np.inf], np.nan)
 
 
-def prepare_ml_data(data: pd.DataFrame) -> pd.DataFrame:
+def prepare_ml_data(data: pd.DataFrame, horizon_bars: int = 1) -> pd.DataFrame:
+    """Prepara features y una etiqueta para un horizonte futuro fijo.
+
+    El horizonte forma parte de la definición del problema: si es 4 en 15m,
+    la etiqueta pregunta si dentro de las próximas 4 velas se obtiene un
+    movimiento alcista suficientemente grande. Las features siguen usando
+    exclusivamente información disponible en la barra actual.
+    """
+    if horizon_bars < 1:
+        raise ValueError("horizon_bars debe ser >= 1.")
+
     result = add_ml_features(data)
 
-    # La etiqueta se calcula con el retorno de la siguiente barra, pero el
-    # umbral solo usa información disponible al cierre de la barra actual.
-    # Así evitamos convertir cualquier pequeño tick alcista en una "señal".
-    next_return = result["Close"].shift(-1) / result["Close"] - 1
+    future_return = (
+        result["Close"].shift(-horizon_bars) / result["Close"] - 1
+    )
     required_move = np.maximum(
         result["volatility_20"] * ACTIONABLE_MOVE_MULTIPLIER,
         MIN_ACTIONABLE_MOVE,
     )
-    result["target"] = (next_return > required_move).astype(float)
-    result.loc[result.index[-1], "target"] = np.nan
+    result["target"] = (future_return > required_move).astype(float)
+    result.loc[result.index[-horizon_bars:], "target"] = np.nan
 
     return result.dropna(subset=FEATURES + ["target"]).copy()
 
@@ -98,9 +107,13 @@ def build_model() -> RandomForestClassifier:
     )
 
 
-def run_ml_backtest(data: pd.DataFrame, train_fraction: float = 0.7) -> MLBacktestResult:
+def run_ml_backtest(
+    data: pd.DataFrame,
+    train_fraction: float = 0.7,
+    horizon_bars: int = 1,
+) -> MLBacktestResult:
     """Entrena con el tramo inicial y genera probabilidades en el tramo final."""
-    prepared = prepare_ml_data(data)
+    prepared = prepare_ml_data(data, horizon_bars=horizon_bars)
     split = int(len(prepared) * train_fraction)
 
     if split < 100 or len(prepared) - split < 20:
