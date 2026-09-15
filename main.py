@@ -370,5 +370,43 @@ def main() -> None:
     print("Objetivo de esta fase: encontrar una ventaja estadística reproducible, no asumir rentabilidad.")
 
 
+def _copy_output_to_clipboard(output: str) -> bool:
+    """Copia todo el output de la ejecución al portapapeles de Windows."""
+    try:
+        import tkinter as tk
+
+        root = tk.Tk()
+        root.withdraw()
+        root.clipboard_clear()
+        root.clipboard_append(output)
+        root.update()
+        root.destroy()
+        return True
+    except Exception:
+        return False
+
+
 if __name__ == "__main__":
-    main()
+    import io
+    import sys
+
+    output_buffer = io.StringIO()
+    original_stdout = sys.stdout
+
+    class _Tee:
+        def write(self, text: str) -> None:
+            original_stdout.write(text)
+            output_buffer.write(text)
+
+        def flush(self) -> None:
+            original_stdout.flush()
+
+    sys.stdout = _Tee()
+    try:
+        main()
+    finally:
+        sys.stdout = original_stdout
+        if _copy_output_to_clipboard(output_buffer.getvalue()):
+            print("\n[OK] Todo el output se ha copiado al portapapeles.")
+        else:
+            print("\n[AVISO] No se pudo copiar automáticamente al portapapeles.")
