@@ -1,6 +1,6 @@
 """Punto de entrada de IA-Trade.
 
-Evaluación walk-forward del modelo de machine learning.
+Evaluación walk-forward de un modelo de machine learning con confianza.
 No conecta con ningún broker ni envía órdenes reales.
 """
 
@@ -16,7 +16,8 @@ def main() -> None:
 
     results, wf_stats = run_walk_forward(data)
     ia_stats = summarize_values(results["portfolio_value"])
-    hold_stats = summarize_values(buy_and_hold_curve(data.loc[results.index[0] : results.index[-1]]))
+    hold_data = data.loc[results.index[0] : results.index[-1]]
+    hold_stats = summarize_values(buy_and_hold_curve(hold_data))
 
     print("\n=== IA-Trade | Walk-Forward ML ===")
     print(f"Activo:                 {TICKER}")
@@ -25,11 +26,15 @@ def main() -> None:
         f"{wf_stats['test_end'].date()} ({wf_stats['test_days']} días)"
     )
     print(f"Ventanas walk-forward:  {wf_stats['windows']}")
+    print(f"Entrada por confianza:  >= {wf_stats['entry_threshold']:.2f}")
+    print(f"Salida por confianza:   <  {wf_stats['exit_threshold']:.2f}")
     print(f"Capital inicial:        {ia_stats['initial_value']:.2f} €")
     print(f"Valor final IA:         {ia_stats['final_value']:.2f} €")
     print(f"Rentabilidad IA:        {ia_stats['return_pct']:.2f} %")
     print(f"Máximo drawdown IA:     {ia_stats['max_drawdown_pct']:.2f} %")
     print(f"Acierto dirección:      {wf_stats['accuracy_pct']:.2f} %")
+    print(f"Confianza media:        {wf_stats['average_confidence_pct']:.2f} %")
+    print(f"Días invertido:         {wf_stats['days_in_market_pct']:.2f} %")
     print(f"Cambios de posición:    {wf_stats['trades']}")
     print(f"Valor final Buy&Hold:   {hold_stats['final_value']:.2f} €")
     print(f"Rentabilidad Buy&Hold:  {hold_stats['return_pct']:.2f} %")
