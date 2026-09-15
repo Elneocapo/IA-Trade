@@ -13,19 +13,20 @@ from config import (
     INTRADAY_TRAIN_SIZE,
     PERIOD,
     TICKER,
+    VALIDATION_TICKERS,
 )
 from evaluation import buy_and_hold_curve, summarize_values
 from market import download_market_data
 from walk_forward import run_walk_forward
 
 
-def print_report(label: str, data, results, wf_stats) -> None:
+def print_report(label: str, ticker: str, data, results, wf_stats) -> None:
     ia_stats = summarize_values(results["portfolio_value"])
     hold_data = data.loc[results.index[0] : results.index[-1]]
     hold_stats = summarize_values(buy_and_hold_curve(hold_data))
 
     print(f"\n=== IA-Trade | {label} ===")
-    print(f"Activo:                 {TICKER}")
+    print(f"Activo:                 {ticker}")
     print(
         f"Periodo de prueba:      {wf_stats['test_start']} -> "
         f"{wf_stats['test_end']} ({wf_stats['test_days']} barras)"
@@ -81,11 +82,22 @@ def print_report(label: str, data, results, wf_stats) -> None:
 
 
 def main() -> None:
-    print(f"Descargando {TICKER} ({PERIOD}, {INTERVAL})...")
-    daily_data = download_market_data(TICKER, PERIOD, INTERVAL)
-    daily_results, daily_stats = run_walk_forward(daily_data)
-    print_report("Walk-Forward ML | Diario", daily_data, daily_results, daily_stats)
+    print("=== VALIDACIÓN MULTIACTIVO | MISMA IA, SIN AJUSTAR UMBRALES ===")
+    for ticker in VALIDATION_TICKERS:
+        print(f"\nDescargando {ticker} ({PERIOD}, {INTERVAL})...")
+        daily_data = download_market_data(ticker, PERIOD, INTERVAL)
+        daily_results, daily_stats = run_walk_forward(daily_data)
+        print_report(
+            "Walk-Forward ML | Diario",
+            ticker,
+            daily_data,
+            daily_results,
+            daily_stats,
+        )
 
+    # Mantenemos una sola prueba intradía para no mezclar todavía demasiadas
+    # variables. Si la señal supera esta validación multiactivo, ampliaremos
+    # después el experimento intradía.
     print(f"\nDescargando {TICKER} ({INTRADAY_PERIOD}, {INTRADAY_INTERVAL})...")
     intraday_data = download_market_data(TICKER, INTRADAY_PERIOD, INTRADAY_INTERVAL)
 
@@ -98,6 +110,7 @@ def main() -> None:
         )
         print_report(
             "Walk-Forward ML | Intradía 15m",
+            TICKER,
             intraday_data,
             intraday_results,
             intraday_stats,
