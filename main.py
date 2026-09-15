@@ -56,6 +56,17 @@ def print_report(label: str, data, results, wf_stats) -> None:
     print(f"Rentabilidad Buy&Hold:  {hold_stats['return_pct']:.2f} %")
     print(f"Drawdown Buy&Hold:      {hold_stats['max_drawdown_pct']:.2f} %")
 
+    print("=== ¿La confianza contiene señal? ===")
+    print("Bin       Muestras  P(subida)  Acierto al alza  Retorno medio  Retorno mediano")
+    for row in wf_stats["confidence_analysis"]:
+        print(
+            f"{row['bin']:<8} {row['samples']:>8}  "
+            f"{row['mean_probability_pct']:>9.2f}%  "
+            f"{row['up_rate_pct']:>14.2f}%  "
+            f"{row['mean_future_return_pct']:>13.3f}%  "
+            f"{row['median_future_return_pct']:>15.3f}%"
+        )
+
     print("=== Señales que más usa el modelo ===")
     for feature, importance in wf_stats["top_features"].items():
         print(f"{feature:<28} {importance:.3f}")
