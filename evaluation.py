@@ -13,11 +13,7 @@ def simulate_predictions(
     initial_cash: float = INITIAL_CASH,
     commission: float = COMMISSION,
 ) -> pd.DataFrame:
-    """Simula una estrategia long-only usando predicciones ya generadas.
-
-    La predicción de un día solo puede convertirse en posición al día siguiente,
-    evitando comprar con información que todavía no estaba disponible.
-    """
+    """Simula una estrategia long-only usando predicciones ya generadas."""
     result = data.loc[predictions.index].copy()
     result["prediction"] = predictions.astype(int)
     result["position"] = result["prediction"].shift(1).fillna(0).astype(int)
@@ -38,17 +34,76 @@ def simulate_predictions(
             cash += shares * price * (1 - commission)
             shares = 0.0
 
-        rows.append(
-            {
-                "date": date,
-                "price": price,
-                "prediction": int(row["prediction"]),
-                "position": target,
-                "cash": cash,
-                "shares": shares,
-                "portfolio_value": cash + shares * price,
-            }
-        )
+        rows.append({
+            "date": date,
+            "price": price,
+            "prediction": int(row["prediction"]),
+            "position": target,
+            "cash": cash,
+            "shares": shares,
+            "portfolio_value": cash + shares * price,
+        })
+
+    return pd.DataFrame(rows).set_index("date")
+
+
+def simulate_probability_strategy(
+    data: pd.DataFrame,
+    probability_up: pd.Series,
+    entry_threshold: float = 0.58,
+    exit_threshold: float = 0.48,
+    initial_cash: float = INITIAL_CASH,
+    commission: float = COMMISSION,
+) -> pd.DataFrame:
+    """Simula una estrategia basada en confianza, con entrada y salida separadas.
+
+    La probabilidad calculada al cierre de un día solo puede cambiar la posición
+    al día siguiente. Los umbrales son fijos y no se optimizan sobre el test.
+    """
+    if not 0.5 < entry_threshold < 1.0:
+        raise ValueError("entry_threshold debe estar entre 0.5 y 1.0.")
+    if 0.0 < exit_threshold >= entry_threshold:
+        raise ValueError("exit_threshold debe ser menor que entry_threshold.")
+
+    result = data.loc[probability_up.index].copy()
+    result["probability_up"] = probability_up.astype(float)
+
+    desired = []
+    in_position = False
+    for probability in result["probability_up"]:
+        if not in_position and probability >= entry_threshold:
+            in_position = True
+        elif in_position and probability < exit_threshold:
+            in_position = False
+        desired.append(int(in_position))
+
+    result["position"] = pd.Series(desired, index=result.index).shift(1).fillna(0).astype(int)
+
+    cash = float(initial_cash)
+    shares = 0.0
+    rows = []
+
+    for date, row in result.iterrows():
+        price = float(row["Close"])
+        target = int(row["position"])
+
+        if target == 1 and shares == 0 and cash > 0:
+            budget = cash / (1 + commission)
+            shares = budget / price
+            cash -= budget * (1 + commission)
+        elif target == 0 and shares > 0:
+            cash += shares * price * (1 - commission)
+            shares = 0.0
+
+        rows.append({
+            "date": date,
+            "price": price,
+            "probability_up": float(row["probability_up"]),
+            "position": target,
+            "cash": cash,
+            "shares": shares,
+            "portfolio_value": cash + shares * price,
+        })
 
     return pd.DataFrame(rows).set_index("date")
 
