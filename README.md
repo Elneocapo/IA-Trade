@@ -12,11 +12,12 @@ Proyecto de investigación para construir un sistema de trading algorítmico con
 - [x] Cartera virtual con capital inicial de 50 €
 - [x] Comisiones simuladas
 - [x] Backtest y cálculo de rentabilidad/drawdown
+- [x] Primer modelo de machine learning (Random Forest)
+- [x] Separación temporal entre entrenamiento y prueba
 - [ ] Tests automáticos
 - [ ] Gestión de riesgo avanzada
 - [ ] Comparación contra buy & hold
-- [ ] Features para machine learning
-- [ ] Modelo ML y validación walk-forward
+- [ ] Validación walk-forward
 - [ ] Paper trading en tiempo real
 - [ ] Dashboard
 
@@ -34,7 +35,13 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Por defecto usa AAPL, 2 años de datos diarios y una cartera virtual de 50 €.
+Por defecto usa AAPL, 2 años de datos diarios y una cartera virtual de 50 €. El programa entrena el modelo con la primera parte de los datos y evalúa sus predicciones sobre un periodo posterior que no ha visto durante el entrenamiento.
+
+## Cómo funciona ahora
+
+El modelo utiliza información disponible en cada día (rendimientos, medias móviles, volatilidad, volumen y RSI) para intentar predecir si el precio de cierre del día siguiente será superior al actual.
+
+La evaluación se hace cronológicamente para reducir el riesgo de contaminación con datos futuros. Aun así, un resultado positivo en backtesting no demuestra que el modelo vaya a ser rentable en el futuro.
 
 ## Filosofía del proyecto
 
