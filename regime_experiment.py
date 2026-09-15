@@ -7,7 +7,12 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, balanced_accuracy_score
 
+from config import INTERVAL, PERIOD, TICKER
+from market import download_market_data
 from ml_model import FEATURES, build_model, prepare_binary_ml_data
+
+
+REGIMES = ("ALCISTA", "LATERAL", "BAJISTA")
 
 
 def _regime(frame: pd.DataFrame) -> pd.Series:
@@ -29,8 +34,7 @@ def _metrics(y_true, y_pred) -> dict:
 
 
 def run_regime_experiment(data: pd.DataFrame, horizon_bars: int = 1) -> dict:
-    prepared = prepare_binary_ml_data(data, horizon_bars=horizon_bars)
-    prepared = prepared.copy()
+    prepared = prepare_binary_ml_data(data, horizon_bars=horizon_bars).copy()
     prepared["regime"] = _regime(prepared)
 
     n = len(prepared)
@@ -56,12 +60,11 @@ def run_regime_experiment(data: pd.DataFrame, horizon_bars: int = 1) -> dict:
         validation["prediction"] = model.predict(validation[FEATURES])
 
         regime_rows = {}
-        for regime in ("ALCISTA", "LATERAL", "BAJISTA"):
+        for regime in REGIMES:
             subset = validation[validation["regime"] == regime]
             if subset.empty:
                 continue
             y = subset["target"].astype(int)
-            # Mayoritaria y momentum se calculan sobre exactamente las mismas muestras.
             majority_prediction = np.full(len(subset), int(train["target"].mean() >= 0.5))
             momentum_prediction = (subset["return_20d"] > 0).astype(int)
             regime_rows[regime] = {
@@ -78,7 +81,7 @@ def run_regime_experiment(data: pd.DataFrame, horizon_bars: int = 1) -> dict:
     final_test["prediction"] = final_model.predict(final_test[FEATURES])
 
     final_rows = {}
-    for regime in ("ALCISTA", "LATERAL", "BAJISTA"):
+    for regime in REGIMES:
         subset = final_test[final_test["regime"] == regime]
         if subset.empty:
             continue
@@ -99,3 +102,54 @@ def run_regime_experiment(data: pd.DataFrame, horizon_bars: int = 1) -> dict:
         "final_test_end": final_test.index[-1],
         "final_test_samples": len(final_test),
     }
+
+
+def _print(stats: dict) -> None:
+    print("=== EXPERIMENTO DE REGÍMENES | ¿DÓNDE FUNCIONA LA IA? ===")
+    print(f"Activo:                 {TICKER}")
+    print(f"Horizonte:              {stats['horizon']} barra")
+    print("Regímenes:              ALCISTA / LATERAL / BAJISTA")
+    print("Regla de régimen:       solo información disponible antes del objetivo")
+    print("Validación:             4 bloques temporales consecutivos")
+    print("Test final:             último 10%, reservado")
+    print()
+    print("FOLD | RÉGIMEN   | N | RF balanced | Momentum | Mayoritaria")
+    for fold in stats["folds"]:
+        for regime in REGIMES:
+            row = fold["regimes"].get(regime)
+            if row is None:
+                continue
+            print(
+                f"{fold['fold']:>4} | {regime:<9} | {row['model']['samples']:>2} | "
+                f"{row['model']['balanced_accuracy_pct']:>11.2f}% | "
+                f"{row['momentum']['balanced_accuracy_pct']:>8.2f}% | "
+                f"{row['majority']['balanced_accuracy_pct']:>11.2f}%"
+            )
+
+    print()
+    print(
+        f"TEST FINAL: {stats['final_test_start'].date()} -> {stats['final_test_end'].date()} | "
+        f"{stats['final_test_samples']} muestras"
+    )
+    print("RÉGIMEN   | N | RF balanced | Momentum | Mayoritaria")
+    for regime in REGIMES:
+        row = stats["final_test"].get(regime)
+        if row is None:
+            continue
+        print(
+            f"{regime:<9} | {row['model']['samples']:>2} | "
+            f"{row['model']['balanced_accuracy_pct']:>11.2f}% | "
+            f"{row['momentum']['balanced_accuracy_pct']:>8.2f}% | "
+            f"{row['majority']['balanced_accuracy_pct']:>11.2f}%"
+        )
+    print()
+    print("Lectura: buscamos un régimen donde RF supere a los baselines de forma repetida, no solo en un fold.")
+
+
+if __name__ == "__main__":
+    print("=== IA-TRADE | EXPERIMENTO DE REGÍMENES ===")
+    print(f"Descargando {TICKER} ({PERIOD}, {INTERVAL})...")
+    market_data = download_market_data(TICKER, PERIOD, INTERVAL)
+    stats = run_regime_experiment(market_data, horizon_bars=1)
+    _print(stats)
+    print("Modo: SIMULACIÓN. No se ha enviado ninguna orden real.")
