@@ -11,6 +11,12 @@ import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 
 
+# Además de indicadores resumidos, damos al modelo una ventana de velas
+# recientes. Así puede aprender patrones de corto plazo sin mirar el futuro.
+# Los precios se normalizan respecto al cierre actual para que el modelo aprenda
+# la forma/movimiento de las velas y no el precio absoluto de AAPL.
+RAW_LAG_BARS = 30
+
 FEATURES = [
     "return_1d",
     "return_5d",
@@ -68,6 +74,18 @@ def add_ml_features(data: pd.DataFrame) -> pd.DataFrame:
     macd_signal = macd.ewm(span=9, adjust=False).mean()
     result["macd_diff"] = macd - macd_signal
 
+    # Ventana de las últimas 30 velas. Incluimos OHLC relativo al cierre de
+    # cada momento y volumen relativo, de forma que el modelo vea más contexto
+    # que un puñado de indicadores agregados.
+    open_price = result["Open"]
+    for lag in range(1, RAW_LAG_BARS + 1):
+        lag_close = close.shift(lag)
+        result[f"lag_{lag}_open"] = open_price.shift(lag) / lag_close - 1
+        result[f"lag_{lag}_high"] = high.shift(lag) / lag_close - 1
+        result[f"lag_{lag}_low"] = low.shift(lag) / lag_close - 1
+        result[f"lag_{lag}_close"] = lag_close / close - 1
+        result[f"lag_{lag}_volume"] = volume.shift(lag) / volume.rolling(20).mean()
+
     return result.replace([np.inf, -np.inf], np.nan)
 
 
@@ -99,9 +117,10 @@ def prepare_ml_data(data: pd.DataFrame, horizon_bars: int = 1) -> pd.DataFrame:
 
 def build_model() -> RandomForestClassifier:
     return RandomForestClassifier(
-        n_estimators=300,
-        max_depth=5,
-        min_samples_leaf=8,
+        n_estimators=400,
+        max_depth=6,
+        min_samples_leaf=10,
+        max_features="sqrt",
         random_state=42,
         class_weight="balanced",
     )
