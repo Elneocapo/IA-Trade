@@ -19,6 +19,7 @@ from evaluation import buy_and_hold_curve, summarize_values
 from market import download_market_data
 from walk_forward import (
     run_directional_walk_forward,
+    run_expanding_temporal_experiment,
     run_training_horizon_experiment,
     run_walk_forward,
 )
@@ -46,6 +47,44 @@ def print_horizon_experiment(ticker: str, stats_list: list[dict]) -> None:
         )
     print()
     print("Lectura: buscamos que validación y test conserven señal, no simplemente que Train sea alto.")
+
+
+def print_expanding_temporal_experiment(ticker: str, stats_list: list[dict]) -> None:
+    print("=== EXPERIMENTO TEMPORAL EXPANSIVO | APRENDER Y AVANZAR ===")
+    print(f"Activo: {ticker}")
+    print("Entrenamiento inicial: 50% del historial")
+    print("Validación: bloques consecutivos del 10%, ampliando el entrenamiento después de cada bloque")
+    print("Test final: último 10%, reservado y no usado para decidir el modelo")
+    print()
+    print("Horizonte | Folds | Val acc media | Val balanced media | Final train | Final test | Test balanced")
+    for stats in stats_list:
+        print(
+            f"{stats['horizon']:>9} | "
+            f"{len(stats['folds']):>5} | "
+            f"{stats['validation_mean_accuracy_pct']:>12.2f}% | "
+            f"{stats['validation_mean_balanced_accuracy_pct']:>18.2f}% | "
+            f"{stats['final_train']['accuracy_pct']:>11.2f}% | "
+            f"{stats['final_test']['accuracy_pct']:>10.2f}% | "
+            f"{stats['final_test']['balanced_accuracy_pct']:>13.2f}%"
+        )
+        for fold in stats["folds"]:
+            validation = fold["validation"]
+            print(
+                f"    Fold {fold['fold']}: "
+                f"train {fold['train_start'].date()} -> {fold['train_end'].date()} | "
+                f"val {fold['validation_start'].date()} -> {fold['validation_end'].date()} | "
+                f"val acc {validation['accuracy_pct']:.2f}% | "
+                f"val balanced {validation['balanced_accuracy_pct']:.2f}%"
+            )
+        print(
+            f"    TEST FINAL: {stats['final_test_start'].date()} -> {stats['final_test_end'].date()} | "
+            f"acc {stats['final_test']['accuracy_pct']:.2f}% | "
+            f"balanced {stats['final_test']['balanced_accuracy_pct']:.2f}% | "
+            f"Brier {stats['final_test']['brier_score']:.4f} | "
+            f"log-loss {stats['final_test']['log_loss']:.4f}"
+        )
+        print()
+    print("Lectura: queremos ver rendimiento de validación relativamente estable entre épocas, y que el test final no se derrumbe.")
 
 
 def print_report(label: str, ticker: str, data, results, wf_stats) -> None:
@@ -137,6 +176,15 @@ def main() -> None:
         print_horizon_experiment(TICKER, horizon_stats)
     except ValueError as error:
         print(f"\nNo se pudo ejecutar el experimento de horizontes: {error}")
+
+    # Ahora hacemos la prueba que nos interesa: la IA aprende, avanza en el
+    # tiempo y vuelve a entrenarse solo con pasado. El último bloque queda
+    # completamente reservado como test final.
+    try:
+        temporal_stats = run_expanding_temporal_experiment(horizon_data)
+        print_expanding_temporal_experiment(TICKER, temporal_stats)
+    except ValueError as error:
+        print(f"\nNo se pudo ejecutar el experimento temporal expansivo: {error}")
 
     print("\n=== VALIDACIÓN MULTIACTIVO | MISMA IA, SIN AJUSTAR UMBRALES ===")
     for ticker in VALIDATION_TICKERS:
