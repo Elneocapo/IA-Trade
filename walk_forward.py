@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
-from sklearn.metrics import balanced_accuracy_score
+from sklearn.metrics import balanced_accuracy_score, log_loss
 
 from evaluation import (
     count_trades,
@@ -17,6 +18,34 @@ ENTRY_THRESHOLD = 0.58
 EXIT_THRESHOLD = 0.48
 
 
+def _probability_columns(model, probabilities: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Devuelve P(down), P(neutral), P(up) aunque una clase falte en una ventana."""
+    columns = {int(cls): i for i, cls in enumerate(model.classes_)}
+    zero = np.zeros(len(probabilities))
+    p_down = probabilities[:, columns[-1]] if -1 in columns else zero
+    p_neutral = probabilities[:, columns[0]] if 0 in columns else zero
+    p_up = probabilities[:, columns[1]] if 1 in columns else zero
+    return p_down, p_neutral, p_up
+
+
+def _multiclass_brier(
+    targets: pd.Series,
+    p_down: pd.Series,
+    p_neutral: pd.Series,
+    p_up: pd.Series,
+) -> float:
+    actual_down = (targets == -1).astype(float)
+    actual_neutral = (targets == 0).astype(float)
+    actual_up = (targets == 1).astype(float)
+    return float(
+        (
+            (p_down - actual_down) ** 2
+            + (p_neutral - actual_neutral) ** 2
+            + (p_up - actual_up) ** 2
+        ).mean()
+    )
+
+
 def run_walk_forward(
     data: pd.DataFrame,
     train_size: int = 252,
@@ -25,13 +54,7 @@ def run_walk_forward(
     exit_threshold: float = EXIT_THRESHOLD,
     horizon_bars: int = 1,
 ) -> tuple[pd.DataFrame, dict]:
-    """Entrena en bloques históricos y prueba siempre en datos posteriores.
-
-    ``horizon_bars`` define tanto la etiqueta futura como, cuando es mayor que
-    1, la duración de la posición. Así evitamos que el modelo prediga un
-    horizonte corto mientras la estrategia mantiene una operación mucho más
-    tiempo.
-    """
+    """Entrena en bloques históricos y prueba siempre en datos posteriores."""
     clean = prepare_ml_data(data, horizon_bars=horizon_bars)
     predictions = []
     feature_importances = []
@@ -45,28 +68,41 @@ def run_walk_forward(
         model = build_model()
         model.fit(train[FEATURES], train["target"].astype(int))
 
-        probability = pd.Series(
-            model.predict_proba(test[FEATURES])[:, 1],
+        probabilities = model.predict_proba(test[FEATURES])
+        p_down, p_neutral, p_up = _probability_columns(model, probabilities)
+
+        window_predictions = pd.DataFrame(
+            {
+                "probability_down": p_down,
+                "probability_neutral": p_neutral,
+                "probability_up": p_up,
+            },
             index=test.index,
-            name="probability_up",
         )
-        predictions.append(probability)
+        predictions.append(window_predictions)
         feature_importances.append(model.feature_importances_)
 
-        predicted_direction = (probability >= 0.5).astype(int)
+        predicted_direction = model.predict(test[FEATURES])
         targets = test["target"].astype(int)
         window_accuracy = float((predicted_direction == targets).mean() * 100)
         window_balanced_accuracy = float(
             balanced_accuracy_score(targets, predicted_direction) * 100
         )
-        window_brier = float(((probability - targets) ** 2).mean())
-        window_stats.append({
-            "start": test.index[0],
-            "end": test.index[-1],
-            "accuracy_pct": window_accuracy,
-            "balanced_accuracy_pct": window_balanced_accuracy,
-            "brier_score": window_brier,
-        })
+        window_brier = _multiclass_brier(
+            targets,
+            pd.Series(p_down, index=test.index),
+            pd.Series(p_neutral, index=test.index),
+            pd.Series(p_up, index=test.index),
+        )
+        window_stats.append(
+            {
+                "start": test.index[0],
+                "end": test.index[-1],
+                "accuracy_pct": window_accuracy,
+                "balanced_accuracy_pct": window_balanced_accuracy,
+                "brier_score": window_brier,
+            }
+        )
         start += test_size
 
     if not predictions:
@@ -75,44 +111,73 @@ def run_walk_forward(
             "Necesitamos más historial o bloques de prueba más pequeños."
         )
 
-    probability_series = pd.concat(predictions).sort_index()
+    prediction_frame = pd.concat(predictions).sort_index()
+    probability_up = prediction_frame["probability_up"]
+
     if horizon_bars == 1:
         results = simulate_probability_strategy(
             clean,
-            probability_series,
+            probability_up,
             entry_threshold=entry_threshold,
             exit_threshold=exit_threshold,
         )
     else:
         results = simulate_fixed_horizon_strategy(
             clean,
-            probability_series,
+            probability_up,
             horizon_bars=horizon_bars,
             entry_threshold=entry_threshold,
         )
 
-    targets = clean.loc[probability_series.index, "target"].astype(int)
-    predicted_direction = (probability_series >= 0.5).astype(int)
+    targets = clean.loc[prediction_frame.index, "target"].astype(int)
+    predicted_direction = prediction_frame[["probability_down", "probability_neutral", "probability_up"]].idxmax(axis=1)
+    predicted_direction = predicted_direction.map(
+        {
+            "probability_down": -1,
+            "probability_neutral": 0,
+            "probability_up": 1,
+        }
+    )
     accuracy = float((predicted_direction == targets).mean() * 100)
     balanced_accuracy = float(
         balanced_accuracy_score(targets, predicted_direction) * 100
     )
-    brier_score = float(((probability_series - targets) ** 2).mean())
-    target_positive_rate = float(targets.mean() * 100)
+    brier_score = _multiclass_brier(
+        targets,
+        prediction_frame["probability_down"],
+        prediction_frame["probability_neutral"],
+        prediction_frame["probability_up"],
+    )
+    target_up_rate = float((targets == 1).mean() * 100)
+    target_down_rate = float((targets == -1).mean() * 100)
+    target_neutral_rate = float((targets == 0).mean() * 100)
     trades = count_trades(results["position"])
-    confidence = float(probability_series.sub(0.5).abs().mean() * 100)
+    confidence = float(prediction_frame["probability_up"].mean() * 100)
     days_in_market = float(results["position"].mean() * 100)
 
-    importances = pd.DataFrame(
-        feature_importances, columns=FEATURES
-    ).mean().sort_values(ascending=False)
-    top_features = importances.head(5).to_dict()
+    # Log-loss multiclass como métrica adicional de calidad probabilística.
+    class_probabilities = prediction_frame[[
+        "probability_down",
+        "probability_neutral",
+        "probability_up",
+    ]].to_numpy()
+    encoded_targets = targets.map({-1: 0, 0: 1, 1: 2}).to_numpy()
+    multiclass_log_loss = float(
+        log_loss(encoded_targets, class_probabilities, labels=[0, 1, 2])
+    )
+
+    importances = pd.DataFrame(feature_importances, columns=FEATURES).mean().sort_values(ascending=False)
+    top_features = importances.head(8).to_dict()
 
     return results, {
         "accuracy_pct": accuracy,
         "balanced_accuracy_pct": balanced_accuracy,
-        "target_positive_rate_pct": target_positive_rate,
+        "target_positive_rate_pct": target_up_rate,
+        "target_up_rate_pct": target_up_rate,
+        "target_down_rate_pct": target_down_rate,
+        "target_neutral_rate_pct": target_neutral_rate,
         "brier_score": brier_score,
+        "multiclass_log_loss": multiclass_log_loss,
         "trades": trades,
         "test_start": results.index[0],
         "test_end": results.index[-1],
