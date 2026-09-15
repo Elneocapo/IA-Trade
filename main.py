@@ -18,6 +18,7 @@ from config import (
 from baseline_experiment import run_baseline_experiment
 from evaluation import buy_and_hold_curve, summarize_values
 from market import download_market_data
+from model_comparison_experiment import run_model_comparison
 from regime_experiment import run_regime_experiment
 from walk_forward import (
     run_directional_walk_forward,
@@ -136,6 +137,49 @@ def print_baseline_experiment(ticker: str, stats: dict) -> None:
         "Lectura: si Random Forest no supera de forma consistente a momentum y a la "
         "mayoritaria, no tiene sentido complicar la IA todavía."
     )
+
+
+def print_model_comparison(ticker: str, stats: dict) -> None:
+    print("=== COMPARACIÓN DE MODELOS | RANDOM FOREST VS RED NEURONAL ===")
+    print(f"Activo:                 {ticker}")
+    print(f"Horizonte:              {stats['horizon']} barra")
+    print("Mismos datos y mismos periodos para todos.")
+    print("El test final se mantiene separado hasta el final.")
+    print()
+    print("Método          | Val acc media | Val balanced | Test acc | Test balanced")
+    for method, label in (
+        ("majority", "Mayoritaria"),
+        ("momentum", "Momentum"),
+        ("random_forest", "Random Forest"),
+        ("neural_network", "Red neuronal"),
+    ):
+        validation = stats["validation_means"][method]
+        final = stats["final_test"][method]
+        print(
+            f"{label:<16} | "
+            f"{validation['accuracy_pct']:>12.2f}% | "
+            f"{validation['balanced_accuracy_pct']:>12.2f}% | "
+            f"{final['accuracy_pct']:>8.2f}% | "
+            f"{final['balanced_accuracy_pct']:>13.2f}%"
+        )
+
+    print()
+    print("Validación por bloque:")
+    print("Bloque | Momentum | Random Forest | Red neuronal")
+    for fold in stats["validation_folds"]:
+        print(
+            f"{fold['fold']:>6} | "
+            f"{fold['momentum']['balanced_accuracy_pct']:>8.2f}% | "
+            f"{fold['random_forest']['balanced_accuracy_pct']:>13.2f}% | "
+            f"{fold['neural_network']['balanced_accuracy_pct']:>12.2f}%"
+        )
+
+    print()
+    print(
+        f"TEST FINAL: {stats['final_test_start'].date()} -> {stats['final_test_end'].date()} | "
+        f"{stats['final_test']['samples']} muestras"
+    )
+    print("Lectura: aquí no buscamos que gane por goleada; buscamos cuál generaliza mejor sin trucos.")
 
 
 def print_regime_experiment(ticker: str, stats: dict) -> None:
@@ -265,13 +309,17 @@ def main() -> None:
     except ValueError as error:
         print(f"\nNo se pudo ejecutar el experimento temporal expansivo: {error}")
 
-    # Antes de cambiar de modelo o añadir complejidad, comprobamos si el
-    # Random Forest aporta información frente a reglas extremadamente simples.
     try:
         baseline_stats = run_baseline_experiment(horizon_data, horizon_bars=1)
         print_baseline_experiment(TICKER, baseline_stats)
     except ValueError as error:
         print(f"\nNo se pudo ejecutar el experimento de baselines: {error}")
+
+    try:
+        model_stats = run_model_comparison(horizon_data, horizon_bars=1)
+        print_model_comparison(TICKER, model_stats)
+    except ValueError as error:
+        print(f"\nNo se pudo ejecutar la comparación de modelos: {error}")
 
     try:
         regime_stats = run_regime_experiment(horizon_data, horizon_bars=1)
