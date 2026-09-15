@@ -1,0 +1,45 @@
+name: IA-Trade Research
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      MPLBACKEND: Agg
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Ejecutar investigación
+        run: |
+          python pattern_ml_backtest_v8.py | tee result.txt
+
+      - name: Guardar resultados
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia-trade-result
+          path: result.txt
