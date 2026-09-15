@@ -17,7 +17,7 @@ from config import (
 )
 from evaluation import buy_and_hold_curve, summarize_values
 from market import download_market_data
-from walk_forward import run_walk_forward
+from walk_forward import run_directional_walk_forward, run_walk_forward
 
 
 def print_report(label: str, ticker: str, data, results, wf_stats) -> None:
@@ -81,6 +81,21 @@ def print_report(label: str, ticker: str, data, results, wf_stats) -> None:
         print("Comparación:             Empate en este periodo.")
 
 
+def print_directional_diagnostic(ticker: str, stats: dict) -> None:
+    print("=== DIAGNÓSTICO DIRECCIONAL | SOLO MOVIMIENTOS ACCIONABLES ===")
+    print(f"Activo:                 {ticker}")
+    print(f"Muestras evaluadas:     {stats['samples']}")
+    print(f"Ventanas walk-forward:  {stats['windows']}")
+    print("Clases:                 SUBE vs BAJA (NEUTRO excluido)")
+    print(f"Acierto binario:        {stats['accuracy_pct']:.2f} %")
+    print(f"Balanced accuracy:      {stats['balanced_accuracy_pct']:.2f} %")
+    print(f"Baseline mayoritaria:   {stats['baseline_accuracy_pct']:.2f} %")
+    print(f"Objetivos SUBE:         {stats['target_up_rate_pct']:.2f} %")
+    print(f"Brier binario:          {stats['brier_score']:.4f}")
+    print(f"Log-loss binario:       {stats['log_loss']:.4f}")
+    print(f"P(subida) media:        {stats['mean_probability_up_pct']:.2f} %")
+
+
 def main() -> None:
     print("=== VALIDACIÓN MULTIACTIVO | MISMA IA, SIN AJUSTAR UMBRALES ===")
     for ticker in VALIDATION_TICKERS:
@@ -94,6 +109,12 @@ def main() -> None:
             daily_results,
             daily_stats,
         )
+
+        try:
+            directional_stats = run_directional_walk_forward(daily_data)
+            print_directional_diagnostic(ticker, directional_stats)
+        except ValueError as error:
+            print(f"\nNo se pudo evaluar el diagnóstico direccional: {error}")
 
     # Mantenemos una sola prueba intradía para no mezclar todavía demasiadas
     # variables. Si la señal supera esta validación multiactivo, ampliaremos
