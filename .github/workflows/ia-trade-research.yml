@@ -28,12 +28,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-      - name: Ejecutar investigación v12
+      - name: Ejecutar investigación v13
         run: |
-          python v12_cross_asset.py | tee result.txt
+          python v13_asset_specific.py | tee result.txt
       - name: Guardar resultados
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ia-trade-result-v12
+          name: ia-trade-result-v13
           path: result.txt
