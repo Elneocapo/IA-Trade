@@ -112,10 +112,11 @@ def simulate_fixed_horizon_strategy(
     initial_cash: float = INITIAL_CASH,
     commission: float = COMMISSION,
 ) -> pd.DataFrame:
-    """Entra al siguiente cierre y mantiene la posición durante un horizonte fijo.
+    """Predice un horizonte fijo y mantiene cada entrada exactamente ese tiempo.
 
-    Esto alinea la lógica de salida con el mismo horizonte que predice el modelo.
-    No se permite abrir una nueva posición mientras otra siga activa.
+    La señal observada al cierre de una barra solo puede abrir una posición en
+    la barra siguiente. Una vez abierta, se mantiene durante ``horizon_bars``
+    barras y después se cierra. No hay salida anticipada por otra predicción.
     """
     if horizon_bars < 1:
         raise ValueError("horizon_bars debe ser >= 1.")
@@ -127,42 +128,40 @@ def simulate_fixed_horizon_strategy(
 
     cash = float(initial_cash)
     shares = 0.0
-    holding = 0
+    bars_remaining = 0
+    pending_entry = False
     rows = []
 
     for date, row in result.iterrows():
         price = float(row["Close"])
 
-        if holding == 0 and float(row["probability_up"]) >= entry_threshold:
+        if pending_entry and shares == 0 and cash > 0:
             budget = cash / (1 + commission)
             shares = budget / price
             cash -= budget * (1 + commission)
-            holding = horizon_bars
+            bars_remaining = horizon_bars
+            pending_entry = False
 
-        elif holding == 1 and shares > 0:
-            cash += shares * price * (1 - commission)
-            shares = 0.0
-            holding = 0
+        if shares > 0:
+            bars_remaining -= 1
+            if bars_remaining <= 0:
+                cash += shares * price * (1 - commission)
+                shares = 0.0
 
-        position = 1 if shares > 0 else 0
+        if shares == 0 and not pending_entry:
+            pending_entry = float(row["probability_up"]) >= entry_threshold
+
         rows.append({
             "date": date,
             "price": price,
             "probability_up": float(row["probability_up"]),
-            "position": position,
+            "position": 1 if shares > 0 else 0,
             "cash": cash,
             "shares": shares,
             "portfolio_value": cash + shares * price,
         })
 
-        if holding > 0:
-            holding -= 1
-
-    # La entrada se hace en el bar siguiente a la predicción, evitando lookahead.
-    result_values = pd.DataFrame(rows).set_index("date")
-    if len(result_values) > 1:
-        result_values["position"] = result_values["position"].shift(1).fillna(0).astype(int)
-    return result_values
+    return pd.DataFrame(rows).set_index("date")
 
 
 def buy_and_hold_curve(data: pd.DataFrame, initial_cash: float = INITIAL_CASH) -> pd.Series:
