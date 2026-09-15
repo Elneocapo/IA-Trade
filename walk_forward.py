@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pandas as pd
+from sklearn.metrics import balanced_accuracy_score
 
 from evaluation import count_trades, simulate_probability_strategy
 from ml_model import FEATURES, build_model, prepare_ml_data
@@ -46,16 +47,17 @@ def run_walk_forward(
         feature_importances.append(model.feature_importances_)
 
         predicted_direction = (probability >= 0.5).astype(int)
-        window_accuracy = float(
-            (predicted_direction == test["target"].astype(int)).mean() * 100
+        targets = test["target"].astype(int)
+        window_accuracy = float((predicted_direction == targets).mean() * 100)
+        window_balanced_accuracy = float(
+            balanced_accuracy_score(targets, predicted_direction) * 100
         )
-        window_brier = float(
-            ((probability - test["target"]) ** 2).mean()
-        )
+        window_brier = float(((probability - targets) ** 2).mean())
         window_stats.append({
             "start": test.index[0],
             "end": test.index[-1],
             "accuracy_pct": window_accuracy,
+            "balanced_accuracy_pct": window_balanced_accuracy,
             "brier_score": window_brier,
         })
         start += test_size
@@ -77,16 +79,24 @@ def run_walk_forward(
     targets = clean.loc[probability_series.index, "target"].astype(int)
     predicted_direction = (probability_series >= 0.5).astype(int)
     accuracy = float((predicted_direction == targets).mean() * 100)
+    balanced_accuracy = float(
+        balanced_accuracy_score(targets, predicted_direction) * 100
+    )
     brier_score = float(((probability_series - targets) ** 2).mean())
+    target_positive_rate = float(targets.mean() * 100)
     trades = count_trades(results["position"])
     confidence = float(probability_series.sub(0.5).abs().mean() * 100)
     days_in_market = float(results["position"].mean() * 100)
 
-    importances = pd.DataFrame(feature_importances, columns=FEATURES).mean().sort_values(ascending=False)
+    importances = pd.DataFrame(
+        feature_importances, columns=FEATURES
+    ).mean().sort_values(ascending=False)
     top_features = importances.head(5).to_dict()
 
     return results, {
         "accuracy_pct": accuracy,
+        "balanced_accuracy_pct": balanced_accuracy,
+        "target_positive_rate_pct": target_positive_rate,
         "brier_score": brier_score,
         "trades": trades,
         "test_start": results.index[0],
