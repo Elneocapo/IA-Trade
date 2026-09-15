@@ -1,7 +1,7 @@
-"""Modelo de machine learning para detectar movimientos potencialmente accionables.
+"""Modelo de machine learning para investigación y backtesting.
 
-Importante: el modelo solo se usa en investigación/backtesting. La validación
-es cronológica para evitar usar datos futuros.
+Importante: el modelo solo se usa en simulación. La validación es cronológica
+para evitar usar datos futuros.
 """
 
 from dataclasses import dataclass
@@ -11,11 +11,10 @@ import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 
 
-# Además de indicadores resumidos, damos al modelo una ventana de velas
-# recientes. Así puede aprender patrones de corto plazo sin mirar el futuro.
-# Los precios se normalizan respecto al cierre actual para que el modelo aprenda
-# la forma/movimiento de las velas y no el precio absoluto de AAPL.
-RAW_LAG_BARS = 30
+# El modelo recibe movimientos y geometría de las velas en varias escalas,
+# además de indicadores clásicos. Evitamos pasar 30 velas OHLCV completas una
+# por una: eso añadía mucho ruido y provocaba fragmentación del DataFrame.
+RETURN_WINDOWS = (1, 2, 4, 8, 16, 30)
 
 FEATURES = [
     "return_1d",
@@ -29,10 +28,20 @@ FEATURES = [
     "volume_ratio_20",
     "rsi_14",
     "macd_diff",
+    "body_pct",
+    "upper_wick_pct",
+    "lower_wick_pct",
+    "close_position_in_range",
+    "range_pct",
+    "volatility_5",
+    "volatility_10",
+    "volume_ratio_5",
+    "volume_ratio_10",
+    "hour_sin",
+    "hour_cos",
+    "day_of_week",
 ]
 
-# Umbral mínimo para considerar que el movimiento futuro tiene suficiente
-# magnitud para ser interesante después de costes simulados.
 ACTIONABLE_MOVE_MULTIPLIER = 0.5
 MIN_ACTIONABLE_MOVE = 0.002  # 0.2%
 
@@ -46,70 +55,94 @@ class MLBacktestResult:
 def add_ml_features(data: pd.DataFrame) -> pd.DataFrame:
     result = data.copy()
     close = result["Close"]
+    open_price = result["Open"]
     high = result["High"]
     low = result["Low"]
     volume = result["Volume"]
 
-    result["return_1d"] = close.pct_change()
-    result["return_5d"] = close.pct_change(5)
-    result["return_20d"] = close.pct_change(20)
+    features = {}
+    features["return_1d"] = close.pct_change()
+    features["return_5d"] = close.pct_change(5)
+    features["return_20d"] = close.pct_change(20)
 
-    result["sma_10_ratio"] = close / close.rolling(10).mean() - 1
-    result["sma_20_ratio"] = close / close.rolling(20).mean() - 1
-    result["sma_50_ratio"] = close / close.rolling(50).mean() - 1
+    features["sma_10_ratio"] = close / close.rolling(10).mean() - 1
+    features["sma_20_ratio"] = close / close.rolling(20).mean() - 1
+    features["sma_50_ratio"] = close / close.rolling(50).mean() - 1
 
-    result["volatility_20"] = result["return_1d"].rolling(20).std()
-    result["range_14"] = ((high - low) / close).rolling(14).mean()
-    result["volume_ratio_20"] = volume / volume.rolling(20).mean()
+    features["volatility_20"] = features["return_1d"].rolling(20).std()
+    features["range_14"] = ((high - low) / close).rolling(14).mean()
+    features["volume_ratio_20"] = volume / volume.rolling(20).mean()
 
     delta = close.diff()
     gains = delta.clip(lower=0).rolling(14).mean()
     losses = (-delta.clip(upper=0)).rolling(14).mean()
     rs = gains / losses.replace(0, np.nan)
-    result["rsi_14"] = 100 - (100 / (1 + rs))
+    features["rsi_14"] = 100 - (100 / (1 + rs))
 
     ema_12 = close.ewm(span=12, adjust=False).mean()
     ema_26 = close.ewm(span=26, adjust=False).mean()
     macd = ema_12 - ema_26
     macd_signal = macd.ewm(span=9, adjust=False).mean()
-    result["macd_diff"] = macd - macd_signal
+    features["macd_diff"] = macd - macd_signal
 
-    # Ventana de las últimas 30 velas. Incluimos OHLC relativo al cierre de
-    # cada momento y volumen relativo, de forma que el modelo vea más contexto
-    # que un puñado de indicadores agregados.
-    open_price = result["Open"]
-    for lag in range(1, RAW_LAG_BARS + 1):
-        lag_close = close.shift(lag)
-        result[f"lag_{lag}_open"] = open_price.shift(lag) / lag_close - 1
-        result[f"lag_{lag}_high"] = high.shift(lag) / lag_close - 1
-        result[f"lag_{lag}_low"] = low.shift(lag) / lag_close - 1
-        result[f"lag_{lag}_close"] = lag_close / close - 1
-        result[f"lag_{lag}_volume"] = volume.shift(lag) / volume.rolling(20).mean()
+    # Movimiento acumulado en distintas escalas.
+    for window in RETURN_WINDOWS:
+        features[f"return_{window}bars"] = close.pct_change(window)
 
+    candle_range = (high - low).replace(0, np.nan)
+    body = close - open_price
+    features["body_pct"] = body / close
+    features["upper_wick_pct"] = (high - pd.concat([open_price, close], axis=1).max(axis=1)) / close
+    features["lower_wick_pct"] = (pd.concat([open_price, close], axis=1).min(axis=1) - low) / close
+    features["close_position_in_range"] = (close - low) / candle_range
+    features["range_pct"] = candle_range / close
+
+    features["volatility_5"] = features["return_1d"].rolling(5).std()
+    features["volatility_10"] = features["return_1d"].rolling(10).std()
+    features["volume_ratio_5"] = volume / volume.rolling(5).mean()
+    features["volume_ratio_10"] = volume / volume.rolling(10).mean()
+
+    # Contexto temporal: útil sobre todo en 15m. En diario aporta poca señal,
+    # pero no introduce información futura.
+    index = result.index
+    if isinstance(index, pd.DatetimeIndex):
+        minutes = index.hour * 60 + index.minute
+        phase = 2 * np.pi * minutes / (24 * 60)
+        features["hour_sin"] = np.sin(phase)
+        features["hour_cos"] = np.cos(phase)
+        features["day_of_week"] = index.dayofweek / 4.0
+    else:
+        features["hour_sin"] = 0.0
+        features["hour_cos"] = 1.0
+        features["day_of_week"] = 0.0
+
+    # Construimos todas las columnas de una vez para evitar el warning de
+    # DataFrame altamente fragmentado que aparecía con 150 asignaciones.
+    feature_frame = pd.DataFrame(features, index=result.index)
+    result = pd.concat([result, feature_frame], axis=1)
     return result.replace([np.inf, -np.inf], np.nan)
 
 
 def prepare_ml_data(data: pd.DataFrame, horizon_bars: int = 1) -> pd.DataFrame:
-    """Prepara features y una etiqueta para un horizonte futuro fijo.
+    """Prepara features y objetivo futuro de tres clases.
 
-    El horizonte forma parte de la definición del problema: si es 4 en 15m,
-    la etiqueta pregunta si dentro de las próximas 4 velas se obtiene un
-    movimiento alcista suficientemente grande. Las features siguen usando
-    exclusivamente información disponible en la barra actual.
+    1 = subida accionable, 0 = movimiento sin ventaja clara, -1 = bajada
+    accionable. El modelo aprende así a distinguir una subida de una simple
+    ausencia de movimiento y de una bajada.
     """
     if horizon_bars < 1:
         raise ValueError("horizon_bars debe ser >= 1.")
 
     result = add_ml_features(data)
-
-    future_return = (
-        result["Close"].shift(-horizon_bars) / result["Close"] - 1
-    )
+    future_return = result["Close"].shift(-horizon_bars) / result["Close"] - 1
     required_move = np.maximum(
         result["volatility_20"] * ACTIONABLE_MOVE_MULTIPLIER,
         MIN_ACTIONABLE_MOVE,
     )
-    result["target"] = (future_return > required_move).astype(float)
+
+    result["target"] = 0
+    result.loc[future_return > required_move, "target"] = 1
+    result.loc[future_return < -required_move, "target"] = -1
     result.loc[result.index[-horizon_bars:], "target"] = np.nan
 
     return result.dropna(subset=FEATURES + ["target"]).copy()
@@ -131,7 +164,6 @@ def run_ml_backtest(
     train_fraction: float = 0.7,
     horizon_bars: int = 1,
 ) -> MLBacktestResult:
-    """Entrena con el tramo inicial y genera probabilidades en el tramo final."""
     prepared = prepare_ml_data(data, horizon_bars=horizon_bars)
     split = int(len(prepared) * train_fraction)
 
@@ -145,7 +177,11 @@ def run_ml_backtest(
     model.fit(train[FEATURES], train["target"].astype(int))
 
     test["prediction"] = model.predict(test[FEATURES])
-    test["probability_up"] = model.predict_proba(test[FEATURES])[:, 1]
+    probabilities = model.predict_proba(test[FEATURES])
+    class_to_column = {int(cls): i for i, cls in enumerate(model.classes_)}
+    test["probability_down"] = probabilities[:, class_to_column.get(-1, 0)] if -1 in class_to_column else 0.0
+    test["probability_neutral"] = probabilities[:, class_to_column.get(0, 0)] if 0 in class_to_column else 0.0
+    test["probability_up"] = probabilities[:, class_to_column.get(1, 0)] if 1 in class_to_column else 0.0
     test["signal"] = test["prediction"].astype(int)
 
     return MLBacktestResult(test, test.index[0])
