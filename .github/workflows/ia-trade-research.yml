@@ -33,13 +33,13 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      - name: Ejecutar investigación v10
+      - name: Ejecutar investigación v11
         run: |
-          python v10_return_pnl.py | tee result.txt
+          python v11_pnl_walkforward.py | tee result.txt
 
       - name: Guardar resultados
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ia-trade-result-v10
+          name: ia-trade-result-v11
           path: result.txt
