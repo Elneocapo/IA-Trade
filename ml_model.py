@@ -127,6 +127,13 @@ def add_ml_features(data: pd.DataFrame) -> pd.DataFrame:
     return result.replace([np.inf, -np.inf], np.nan)
 
 
+def _required_move(result: pd.DataFrame) -> pd.Series:
+    return np.maximum(
+        result["volatility_20"] * ACTIONABLE_MOVE_MULTIPLIER,
+        MIN_ACTIONABLE_MOVE,
+    )
+
+
 def prepare_ml_data(data: pd.DataFrame, horizon_bars: int = 1) -> pd.DataFrame:
     """Prepara features y objetivo futuro de tres clases.
 
@@ -139,14 +146,34 @@ def prepare_ml_data(data: pd.DataFrame, horizon_bars: int = 1) -> pd.DataFrame:
 
     result = add_ml_features(data)
     future_return = result["Close"].shift(-horizon_bars) / result["Close"] - 1
-    required_move = np.maximum(
-        result["volatility_20"] * ACTIONABLE_MOVE_MULTIPLIER,
-        MIN_ACTIONABLE_MOVE,
-    )
+    required_move = _required_move(result)
 
     result["target"] = 0
     result.loc[future_return > required_move, "target"] = 1
     result.loc[future_return < -required_move, "target"] = -1
+    result.loc[result.index[-horizon_bars:], "target"] = np.nan
+
+    return result.dropna(subset=FEATURES + ["target"]).copy()
+
+
+def prepare_binary_ml_data(data: pd.DataFrame, horizon_bars: int = 1) -> pd.DataFrame:
+    """Prepara un objetivo binario para comprobar si existe señal direccional.
+
+    Se conservan solo movimientos accionables: 1 = subida y 0 = bajada.
+    Los movimientos NEUTRO se excluyen del diagnóstico. Esto evita que una
+    clase mayoritaria domine la métrica y permite medir la pregunta concreta:
+    cuando el mercado se mueve lo suficiente, ¿la IA distingue la dirección?
+    """
+    if horizon_bars < 1:
+        raise ValueError("horizon_bars debe ser >= 1.")
+
+    result = add_ml_features(data)
+    future_return = result["Close"].shift(-horizon_bars) / result["Close"] - 1
+    required_move = _required_move(result)
+
+    result["target"] = np.nan
+    result.loc[future_return > required_move, "target"] = 1
+    result.loc[future_return < -required_move, "target"] = 0
     result.loc[result.index[-horizon_bars:], "target"] = np.nan
 
     return result.dropna(subset=FEATURES + ["target"]).copy()
