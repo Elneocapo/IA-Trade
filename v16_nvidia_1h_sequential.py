@@ -1,8 +1,10 @@
-"""IA-Trade V16.3 - NVDA only, sequential 1H next-candle prediction.
+"""IA-Trade V16.4 - NVDA only, sequential 1H next-candle prediction.
 
 Paper trading / research only. No broker or live orders.
-At every hourly close the model uses only information already known and
-predicts the NEXT 1H candle. The simulator acts only after that close.
+At every hourly close the model uses only information known at that moment.
+The primary target is the NEXT 1H candle; a short auxiliary 3H target helps
+judge whether a one-hour signal has continuation. The simulator still makes
+a new decision every hour and never uses future information.
 """
 from __future__ import annotations
 import time
@@ -18,15 +20,15 @@ PERIOD = "2y"
 INTERVAL = "1h"
 LOOKBACK_BARS = 65
 MAX_HOLD_BARS = 13
-TRAIN_WINDOW = 700
-RETRAIN_EVERY = 48
-MODEL_MAX_ITER = 100
+TRAIN_WINDOW = 1500
+RETRAIN_EVERY = 24
+MODEL_MAX_ITER = 120
 COST = 0.001
 INITIAL_CASH = 50.0
 
 
 def load_data() -> pd.DataFrame:
-    print(f"=== V16.3 | {ASSET} | {INTERVAL} | context={LOOKBACK_BARS} bars | max hold={MAX_HOLD_BARS} bars ===", flush=True)
+    print(f"=== V16.4 | {ASSET} | {INTERVAL} | context={LOOKBACK_BARS} bars | max hold={MAX_HOLD_BARS} bars ===", flush=True)
     df = yf.download(ASSET, period=PERIOD, interval=INTERVAL, auto_adjust=True, progress=False, prepost=False)
     if df.empty:
         raise RuntimeError(f"No data returned for {ASSET}")
@@ -55,8 +57,18 @@ def features(df: pd.DataFrame) -> pd.DataFrame:
         z[f"ema{n}"] = c/c.ewm(span=n, adjust=False).mean()-1
         z[f"range{n}"] = z["range"].rolling(n).mean()
         z[f"vr{n}"] = v/(v.rolling(n).mean()+1e-9)
+
     z["ema12_48"] = c.ewm(span=12, adjust=False).mean()/c.ewm(span=48, adjust=False).mean()-1
+    z["ema24_65"] = c.ewm(span=24, adjust=False).mean()/c.ewm(span=65, adjust=False).mean()-1
     z["vol_ratio"] = z["vol6"]/(z["vol48"]+1e-9)
+
+    # Explicit compact lags: the model can distinguish recent sequences inside
+    # the same 65-bar information horizon without flattening 65 full rows.
+    for lag in (1, 2, 3, 6, 12, 24, 48):
+        z[f"lag_r{lag}"] = r.shift(lag)
+        z[f"lag_body{lag}"] = z["body"].shift(lag)
+        z[f"lag_loc{lag}"] = z["close_loc"].shift(lag)
+
     hour = df.index.hour + df.index.minute/60
     z["hour_sin"] = np.sin(2*np.pi*(hour-9.5)/6.5)
     z["hour_cos"] = np.cos(2*np.pi*(hour-9.5)/6.5)
@@ -68,60 +80,66 @@ def features(df: pd.DataFrame) -> pd.DataFrame:
 def make_supervised(df):
     f = features(df)
     c = df["Close"].astype(float)
-    future = c.shift(-1)/c-1
+    ret1 = c.shift(-1)/c - 1
+    ret3 = c.shift(-3)/c - 1
     scale = f["vol6"].clip(lower=0.0005)
-    y = future/scale
-    # The model sees compact features computed from the full 65-bar context,
-    # rather than 65 x N raw columns. This keeps the same information horizon
-    # while greatly reducing dimensionality and overfitting.
-    return f, future, y
+    y1 = ret1/scale
+    y3 = ret3/(scale*np.sqrt(3))
+    return f, ret1, y1, y3
 
 
-def fit_model(X,y):
+def fit_model(X, y, seed):
     return HistGradientBoostingRegressor(
         max_iter=MODEL_MAX_ITER,
         learning_rate=0.045,
-        max_leaf_nodes=9,
-        min_samples_leaf=18,
+        max_leaf_nodes=11,
+        min_samples_leaf=20,
         l2_regularization=3.0,
         loss="absolute_error",
-        random_state=42,
-    ).fit(X,y)
+        random_state=seed,
+    ).fit(X, y)
 
 
 def sequential_predictions(df, split_start, split_end):
-    f, future_ret, y = make_supervised(df)
-    valid = []
-    for i in range(LOOKBACK_BARS-1, len(f)-1):
-        if split_start <= i < split_end and np.isfinite(y.iloc[i]) and not f.iloc[i].isna().any():
+    f, future1, y1, y3 = make_supervised(df)
+    X = f.to_numpy(dtype=float)
+    a = y1.to_numpy(dtype=float)
+    b = y3.to_numpy(dtype=float)
+    valid=[]
+    for i in range(LOOKBACK_BARS-1, len(f)-3):
+        if split_start <= i < split_end and np.isfinite(a[i]) and np.isfinite(b[i]) and np.isfinite(X[i]).all():
             valid.append(i)
     if not valid:
         return pd.DataFrame()
 
-    # Every training row is a single hourly decision. At prediction i,
-    # only rows with known targets strictly before i are eligible.
-    X = f.to_numpy(dtype=float)
-    yy = y.to_numpy(dtype=float)
-    outputs=[]; model=None; last_fit=-10**9
+    outputs=[]; m1=None; m3=None; last_fit=-10**9
     total=len(valid); started=time.time()
     for count,i in enumerate(valid,1):
-        if model is None or i-last_fit >= RETRAIN_EVERY:
+        if m1 is None or i-last_fit >= RETRAIN_EVERY:
             end=i
             start=max(LOOKBACK_BARS-1, end-TRAIN_WINDOW)
             idx=np.arange(start,end)
-            good=np.isfinite(yy[idx]) & np.isfinite(X[idx]).all(axis=1)
+            good=np.isfinite(a[idx]) & np.isfinite(b[idx]) & np.isfinite(X[idx]).all(axis=1)
             idx=idx[good]
-            if len(idx)>=250:
-                model=fit_model(X[idx],yy[idx]); last_fit=i
-        if model is None:
+            if len(idx)>=400:
+                m1=fit_model(X[idx],a[idx],42)
+                m3=fit_model(X[idx],b[idx],43)
+                last_fit=i
+        if m1 is None:
             continue
-        pred_norm=float(model.predict(X[i].reshape(1,-1))[0])
-        pred_ret=pred_norm*max(float(f["vol6"].iloc[i]),0.0005)
-        outputs.append((df.index[i],float(df["Close"].iloc[i]),pred_ret,pred_norm,float(f["ema12_48"].iloc[i])))
+        p1=float(m1.predict(X[i].reshape(1,-1))[0])
+        p3=float(m3.predict(X[i].reshape(1,-1))[0])
+        scale=max(float(f["vol6"].iloc[i]),0.0005)
+        r1=p1*scale
+        r3=p3*scale*np.sqrt(3)
+        # Primary signal remains the next-hour forecast. Continuation is a
+        # confirmation term, not a replacement for the next-candle prediction.
+        signal=0.70*r1+0.30*(r3/3.0)
+        outputs.append((df.index[i],float(df["Close"].iloc[i]),r1,r3,signal,float(f["ema12_48"].iloc[i])))
         if count==1 or count%200==0 or count==total:
             elapsed=time.time()-started; rate=count/max(elapsed,1e-9); eta=(total-count)/max(rate,1e-9)
             print(f"prediction {count}/{total} | {rate:.1f} bars/s | ETA ~{eta/60:.1f} min",flush=True)
-    return pd.DataFrame(outputs,columns=["date","price","pred_return","pred_norm","trend"]).set_index("date")
+    return pd.DataFrame(outputs,columns=["date","price","pred_return","pred_3h","signal","trend"]).set_index("date")
 
 
 def backtest(df,panel,start,end,threshold,max_weight,trend_filter):
@@ -129,7 +147,7 @@ def backtest(df,panel,start,end,threshold,max_weight,trend_filter):
     cash,shares=INITIAL_CASH,0.0; entry=None; curve=[]; trade_returns=[]; entry_value=None
     for i,d in enumerate(dates):
         row=panel.loc[d]; price=float(row.price); total=cash+shares*price
-        signal=float(row.pred_return)>threshold
+        signal=float(row.signal)>threshold
         if trend_filter and float(row.trend)<=0: signal=False
         target=max_weight if signal else 0.0
         if shares>0 and entry is not None and i-entry>=MAX_HOLD_BARS: target=0.0
@@ -176,21 +194,22 @@ def main():
     vs,ve=val[0],val[-1]; ts,te=test[0],test[-1]
 
     candidates=[]
-    # Threshold is deliberately selected only on validation. Trend filtering is
-    # also selected only there, then frozen for the untouched final test.
-    for threshold in (0.001,0.0015,0.002,0.0025,0.003,0.004,0.005,0.006):
-        for weight in (0.25,0.35,0.50,0.70):
+    # Broader threshold grid prevents the optimizer from being forced into
+    # ultra-rare trades. Selection is still validation-only; final test remains untouched.
+    for threshold in (-0.001, -0.0005, 0.0, 0.0005, 0.001, 0.0015, 0.002, 0.0025, 0.003, 0.004):
+        for weight in (0.25,0.35,0.50,0.70,0.90):
             for tf in (False,True):
                 r,tr,dd,sh,wr,_=backtest(df,panel,vs,ve,threshold,weight,tf)
-                # Favor return, but penalize deep drawdowns and unstable Sharpe.
-                score=r-0.50*abs(min(dd,0))+0.02*max(sh,0)
+                score=r-0.35*abs(min(dd,0))+0.01*max(sh,0)
+                if tr < 8:
+                    score -= 0.01*(8-tr)
                 candidates.append((score,r,threshold,weight,tf,tr,dd,sh,wr))
     best=max(candidates,key=lambda x:x[0])
     _,vr,threshold,weight,tf,vt,vdd,vsh,vwr=best
     fr,ft,fdd,fsh,fwr,final_cash=backtest(df,panel,ts,te,threshold,weight,tf)
     bh=buy_and_hold(df,ts,te); bh_cash=INITIAL_CASH*(1+bh); elapsed=time.time()-overall
 
-    print("\n=== V16.3 NVDA SEQUENTIAL 1H SUMMARY ===")
+    print("\n=== V16.4 NVDA SEQUENTIAL 1H SUMMARY ===")
     print(f"asset={ASSET} | candles={INTERVAL} | history={PERIOD}")
     print(f"context={LOOKBACK_BARS} bars (~10 trading days) | prediction=NEXT 1H candle | max_hold={MAX_HOLD_BARS} bars (~2 trading days)")
     print(f"data={df.index[0]} -> {df.index[-1]} | total_bars={len(df)}")
