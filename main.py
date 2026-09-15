@@ -15,6 +15,7 @@ from config import (
     TICKER,
     VALIDATION_TICKERS,
 )
+from baseline_experiment import run_baseline_experiment
 from evaluation import buy_and_hold_curve, summarize_values
 from market import download_market_data
 from walk_forward import (
@@ -85,6 +86,55 @@ def print_expanding_temporal_experiment(ticker: str, stats_list: list[dict]) -> 
         )
         print()
     print("Lectura: queremos ver rendimiento de validación relativamente estable entre épocas, y que el test final no se derrumbe.")
+
+
+def print_baseline_experiment(ticker: str, stats: dict) -> None:
+    print("=== EXPERIMENTO DE BASELINES | ¿LA IA APORTA ALGO? ===")
+    print(f"Activo:                 {ticker}")
+    print(f"Horizonte:              {stats['horizon']} barra")
+    print("Clases:                 SUBE vs BAJA (NEUTRO excluido)")
+    print("Mismo periodo y mismas muestras para todos los métodos.")
+    print("Validación:             4 bloques temporales consecutivos")
+    print("Test final:             último bloque, reservado")
+    print()
+    print("Método      | Val acc media | Val balanced | Test acc | Test balanced")
+    for method, label in (
+        ("random", "Azar"),
+        ("majority", "Mayoritaria"),
+        ("momentum", "Momentum"),
+        ("model", "Random Forest"),
+    ):
+        validation = stats["validation_means"][method]
+        final = stats["final_test"][method]
+        print(
+            f"{label:<12} | "
+            f"{validation['accuracy_pct']:>12.2f}% | "
+            f"{validation['balanced_accuracy_pct']:>12.2f}% | "
+            f"{final['accuracy_pct']:>8.2f}% | "
+            f"{final['balanced_accuracy_pct']:>13.2f}%"
+        )
+
+    print()
+    print("Detalle de validación por época:")
+    print("Fold | Azar bal. | Mayoritaria bal. | Momentum bal. | Random Forest bal.")
+    for fold in stats["validation_folds"]:
+        print(
+            f"{fold['fold']:>4} | "
+            f"{fold['random']['balanced_accuracy_pct']:>9.2f}% | "
+            f"{fold['majority']['balanced_accuracy_pct']:>16.2f}% | "
+            f"{fold['momentum']['balanced_accuracy_pct']:>13.2f}% | "
+            f"{fold['model']['balanced_accuracy_pct']:>18.2f}%"
+        )
+
+    print()
+    print(
+        f"Test final: {stats['final_test_start'].date()} -> {stats['final_test_end'].date()} | "
+        f"{stats['final_test']['samples']} muestras"
+    )
+    print(
+        "Lectura: si Random Forest no supera de forma consistente a momentum y a la "
+        "mayoritaria, no tiene sentido complicar la IA todavía."
+    )
 
 
 def print_report(label: str, ticker: str, data, results, wf_stats) -> None:
@@ -166,9 +216,6 @@ def print_directional_diagnostic(ticker: str, stats: dict) -> None:
 def main() -> None:
     print("=== IA-TRADE | LABORATORIO DE APRENDIZAJE Y VALIDACIÓN ===")
 
-    # Primero comprobamos explícitamente si el horizonte cambia la señal.
-    # Esto no optimiza la rentabilidad: compara 1/3/5/10/20 barras con un
-    # único modelo y deja un test final separado.
     print(f"\nDescargando {TICKER} ({PERIOD}, {INTERVAL}) para el experimento de aprendizaje...")
     horizon_data = download_market_data(TICKER, PERIOD, INTERVAL)
     try:
@@ -177,14 +224,19 @@ def main() -> None:
     except ValueError as error:
         print(f"\nNo se pudo ejecutar el experimento de horizontes: {error}")
 
-    # Ahora hacemos la prueba que nos interesa: la IA aprende, avanza en el
-    # tiempo y vuelve a entrenarse solo con pasado. El último bloque queda
-    # completamente reservado como test final.
     try:
         temporal_stats = run_expanding_temporal_experiment(horizon_data)
         print_expanding_temporal_experiment(TICKER, temporal_stats)
     except ValueError as error:
         print(f"\nNo se pudo ejecutar el experimento temporal expansivo: {error}")
+
+    # Antes de cambiar de modelo o añadir complejidad, comprobamos si el
+    # Random Forest aporta información frente a reglas extremadamente simples.
+    try:
+        baseline_stats = run_baseline_experiment(horizon_data, horizon_bars=1)
+        print_baseline_experiment(TICKER, baseline_stats)
+    except ValueError as error:
+        print(f"\nNo se pudo ejecutar el experimento de baselines: {error}")
 
     print("\n=== VALIDACIÓN MULTIACTIVO | MISMA IA, SIN AJUSTAR UMBRALES ===")
     for ticker in VALIDATION_TICKERS:
