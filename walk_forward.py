@@ -1,4 +1,4 @@
-"""Validación walk-forward del modelo de machine learning."""
+"""Validación walk-forward y experimentos de entrenamiento del modelo."""
 
 from __future__ import annotations
 
@@ -77,17 +77,94 @@ def _confidence_bins(predictions: pd.DataFrame, data: pd.DataFrame, horizon_bars
     return result
 
 
+def run_training_horizon_experiment(
+    data: pd.DataFrame,
+    horizons: tuple[int, ...] = (1, 3, 5, 10, 20),
+) -> list[dict]:
+    """Compara horizontes con entrenamiento, validación y test separados.
+
+    La división es cronológica: 60% entrenamiento, 20% validación y 20% test.
+    Se elimina un margen de `horizon_bars` al final del entrenamiento para que
+    el objetivo futuro de esas muestras no pueda mirar dentro de validación.
+
+    El test permanece completamente fuera del entrenamiento y validación. Este
+    experimento no cambia la estrategia ni busca el horizonte que dé más dinero:
+    primero comprueba dónde existe señal predictiva y cuánto generaliza el modelo.
+    """
+    results = []
+
+    for horizon in horizons:
+        prepared = prepare_ml_data(data, horizon_bars=horizon)
+        if len(prepared) < 300:
+            continue
+
+        train_end = int(len(prepared) * 0.60)
+        validation_end = int(len(prepared) * 0.80)
+        train_end_purged = train_end - horizon
+
+        train = prepared.iloc[:train_end_purged]
+        validation = prepared.iloc[train_end:validation_end]
+        test = prepared.iloc[validation_end:]
+
+        if len(train) < 100 or len(validation) < 30 or len(test) < 30:
+            continue
+
+        model = build_model()
+        model.fit(train[FEATURES], train["target"].astype(int))
+
+        def evaluate(frame: pd.DataFrame) -> dict:
+            targets = frame["target"].astype(int)
+            predictions = model.predict(frame[FEATURES])
+            probabilities = model.predict_proba(frame[FEATURES])
+            p_down, p_neutral, p_up = _probability_columns(model, probabilities)
+            probability_frame = np.column_stack([p_down, p_neutral, p_up])
+            encoded_targets = targets.map({-1: 0, 0: 1, 1: 2}).to_numpy()
+            brier = _multiclass_brier(
+                targets,
+                pd.Series(p_down, index=frame.index),
+                pd.Series(p_neutral, index=frame.index),
+                pd.Series(p_up, index=frame.index),
+            )
+            return {
+                "accuracy_pct": float((predictions == targets).mean() * 100),
+                "balanced_accuracy_pct": float(
+                    balanced_accuracy_score(targets, predictions) * 100
+                ),
+                "brier_score": brier,
+                "log_loss": float(
+                    log_loss(encoded_targets, probability_frame, labels=[0, 1, 2])
+                ),
+                "samples": len(frame),
+            }
+
+        train_stats = evaluate(train)
+        validation_stats = evaluate(validation)
+        test_stats = evaluate(test)
+
+        results.append(
+            {
+                "horizon": horizon,
+                "train": train_stats,
+                "validation": validation_stats,
+                "test": test_stats,
+                "test_start": test.index[0],
+                "test_end": test.index[-1],
+            }
+        )
+
+    if not results:
+        raise ValueError("No hay suficientes datos para el experimento de horizontes.")
+
+    return results
+
+
 def run_directional_walk_forward(
     data: pd.DataFrame,
     train_size: int = 252,
     test_size: int = 63,
     horizon_bars: int = 1,
 ) -> dict:
-    """Diagnóstico binario: solo SUBE vs BAJA en movimientos accionables.
-
-    Los NEUTRO se eliminan antes de dividir en bloques. La evaluación sigue
-    siendo estrictamente cronológica y no modifica la estrategia principal.
-    """
+    """Diagnóstico binario: solo SUBE vs BAJA en movimientos accionables."""
     clean = prepare_binary_ml_data(data, horizon_bars=horizon_bars)
     predictions = []
     window_stats = []
