@@ -19,7 +19,7 @@ from evaluation import buy_and_hold_curve, summarize_values
 from market import download_market_data
 from walk_forward import (
     run_directional_walk_forward,
-    run_horizon_training_experiment,
+    run_training_horizon_experiment,
     run_walk_forward,
 )
 
@@ -133,7 +133,7 @@ def main() -> None:
     print(f"\nDescargando {TICKER} ({PERIOD}, {INTERVAL}) para el experimento de aprendizaje...")
     horizon_data = download_market_data(TICKER, PERIOD, INTERVAL)
     try:
-        horizon_stats = run_horizon_training_experiment(horizon_data)
+        horizon_stats = run_training_horizon_experiment(horizon_data)
         print_horizon_experiment(TICKER, horizon_stats)
     except ValueError as error:
         print(f"\nNo se pudo ejecutar el experimento de horizontes: {error}")
