@@ -24,9 +24,6 @@ from market import download_market_data
 
 LOOKBACK_BARS = 32
 TRAIN_FRACTION = 0.70
-
-# Buscamos una estrategia de mayor frecuencia. La red decide, pero no exigimos
-# una probabilidad tan alta que termine haciendo solo unas pocas operaciones.
 ENTRY_PROBABILITY = 0.54
 EXIT_PROBABILITY = 0.50
 
@@ -39,7 +36,6 @@ def build_sequences(data):
     low = data["Low"].astype(float)
     volume = data["Volume"].astype(float).replace(0, np.nan)
 
-    # log1p de cambios de volumen evita log(0) y mantiene el cálculo estable.
     log_return = np.log(close / close.shift(1)).replace([np.inf, -np.inf], np.nan)
     range_pct = (high - low) / close
     body_pct = (close - open_price) / close
@@ -81,22 +77,23 @@ def build_sequences(data):
 
 
 def train_network(X_train, y_train):
-    """Entrena una red neuronal sobre secuencias aplanadas."""
+    """Entrena una red más grande con un presupuesto de épocas mayor."""
     scaler = StandardScaler()
     X_flat = X_train.reshape(len(X_train), -1)
     X_scaled = scaler.fit_transform(X_flat)
 
     model = MLPClassifier(
-        hidden_layer_sizes=(128, 64),
+        hidden_layer_sizes=(256, 128, 64),
         activation="relu",
         solver="adam",
-        alpha=0.001,
+        alpha=0.002,
         batch_size=64,
-        learning_rate_init=0.001,
-        max_iter=120,
+        learning_rate_init=0.0005,
+        max_iter=300,
         early_stopping=True,
         validation_fraction=0.15,
-        n_iter_no_change=15,
+        n_iter_no_change=30,
+        tol=0.00005,
         random_state=42,
         verbose=True,
     )
@@ -135,6 +132,8 @@ def main() -> None:
     print(f"Datos: {INTRADAY_PERIOD} | {INTRADAY_INTERVAL}")
     print(f"Patrón observado: últimas {LOOKBACK_BARS} velas")
     print(f"Horizonte: {INTRADAY_HORIZON_BARS} velas")
+    print("Arquitectura: 256 → 128 → 64 neuronas")
+    print("Entrenamiento máximo: 300 épocas")
     print("Modo: SIMULACIÓN / sin broker")
     print()
 
