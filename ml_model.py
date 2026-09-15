@@ -1,7 +1,7 @@
 """Modelo de machine learning para predecir la dirección del día siguiente.
 
-Importante: el modelo solo se usa en investigación/backtesting. La división
-entre entrenamiento y prueba es cronológica para evitar usar datos futuros.
+Importante: el modelo solo se usa en investigación/backtesting. La validación
+es cronológica para evitar usar datos futuros.
 """
 
 from dataclasses import dataclass
@@ -14,12 +14,15 @@ from sklearn.ensemble import RandomForestClassifier
 FEATURES = [
     "return_1d",
     "return_5d",
+    "return_20d",
     "sma_10_ratio",
     "sma_20_ratio",
     "sma_50_ratio",
     "volatility_20",
-    "volume_change",
+    "range_14",
+    "volume_ratio_20",
     "rsi_14",
+    "macd_diff",
 ]
 
 
@@ -32,20 +35,33 @@ class MLBacktestResult:
 def add_ml_features(data: pd.DataFrame) -> pd.DataFrame:
     result = data.copy()
     close = result["Close"]
+    high = result["High"]
+    low = result["Low"]
+    volume = result["Volume"]
 
     result["return_1d"] = close.pct_change()
     result["return_5d"] = close.pct_change(5)
+    result["return_20d"] = close.pct_change(20)
+
     result["sma_10_ratio"] = close / close.rolling(10).mean() - 1
     result["sma_20_ratio"] = close / close.rolling(20).mean() - 1
     result["sma_50_ratio"] = close / close.rolling(50).mean() - 1
+
     result["volatility_20"] = result["return_1d"].rolling(20).std()
-    result["volume_change"] = result["Volume"].pct_change().replace([np.inf, -np.inf], np.nan)
+    result["range_14"] = ((high - low) / close).rolling(14).mean()
+    result["volume_ratio_20"] = volume / volume.rolling(20).mean()
 
     delta = close.diff()
     gains = delta.clip(lower=0).rolling(14).mean()
     losses = (-delta.clip(upper=0)).rolling(14).mean()
     rs = gains / losses.replace(0, np.nan)
     result["rsi_14"] = 100 - (100 / (1 + rs))
+
+    ema_12 = close.ewm(span=12, adjust=False).mean()
+    ema_26 = close.ewm(span=26, adjust=False).mean()
+    macd = ema_12 - ema_26
+    macd_signal = macd.ewm(span=9, adjust=False).mean()
+    result["macd_diff"] = macd - macd_signal
 
     return result.replace([np.inf, -np.inf], np.nan)
 
@@ -57,8 +73,18 @@ def prepare_ml_data(data: pd.DataFrame) -> pd.DataFrame:
     return result.dropna(subset=FEATURES + ["target"]).copy()
 
 
+def build_model() -> RandomForestClassifier:
+    return RandomForestClassifier(
+        n_estimators=300,
+        max_depth=5,
+        min_samples_leaf=8,
+        random_state=42,
+        class_weight="balanced",
+    )
+
+
 def run_ml_backtest(data: pd.DataFrame, train_fraction: float = 0.7) -> MLBacktestResult:
-    """Entrena con el tramo inicial y genera predicciones para el tramo final."""
+    """Entrena con el tramo inicial y genera probabilidades en el tramo final."""
     prepared = prepare_ml_data(data)
     split = int(len(prepared) * train_fraction)
 
@@ -68,13 +94,7 @@ def run_ml_backtest(data: pd.DataFrame, train_fraction: float = 0.7) -> MLBackte
     train = prepared.iloc[:split]
     test = prepared.iloc[split:].copy()
 
-    model = RandomForestClassifier(
-        n_estimators=300,
-        max_depth=5,
-        min_samples_leaf=8,
-        random_state=42,
-        class_weight="balanced",
-    )
+    model = build_model()
     model.fit(train[FEATURES], train["target"].astype(int))
 
     test["prediction"] = model.predict(test[FEATURES])
