@@ -28,6 +28,9 @@ ENTRY_PROBABILITY = 0.54
 EXIT_PROBABILITY = 0.50
 MIN_TRAIN_FRACTION = 0.45
 WALK_FORWARD_SPLITS = 4
+TRAIN_VALIDATION_FRACTION = 0.15
+TRAIN_EPOCHS = 120
+TRAIN_PATIENCE = 20
 
 
 def build_sequences(data):
@@ -113,10 +116,16 @@ def build_sequences(data):
 
 
 def train_network(X_train, y_train):
-    """Entrena la red y devuelve también su curva de pérdida."""
+    """Entrena por épocas usando una validación temporal interna, sin mezclar futuro."""
     scaler = StandardScaler()
     X_flat = X_train.reshape(len(X_train), -1)
-    X_scaled = scaler.fit_transform(X_flat)
+    split = int(len(X_flat) * (1 - TRAIN_VALIDATION_FRACTION))
+    split = min(max(split, 1), len(X_flat) - 1)
+
+    X_fit, X_val = X_flat[:split], X_flat[split:]
+    y_fit, y_val = y_train[:split], y_train[split:]
+    X_fit_scaled = scaler.fit_transform(X_fit)
+    X_val_scaled = scaler.transform(X_val)
 
     model = MLPClassifier(
         hidden_layer_sizes=(256, 128, 64),
@@ -125,15 +134,49 @@ def train_network(X_train, y_train):
         alpha=0.002,
         batch_size=64,
         learning_rate_init=0.0005,
-        max_iter=300,
-        early_stopping=True,
-        validation_fraction=0.15,
-        n_iter_no_change=30,
-        tol=0.00005,
+        max_iter=1,
+        warm_start=True,
+        shuffle=True,
         random_state=42,
-        verbose=True,
     )
-    model.fit(X_scaled, y_train)
+
+    losses = []
+    validation_scores = []
+    best_score = -np.inf
+    best_state = None
+    patience = 0
+
+    print("Entrenando red neuronal por épocas con validación temporal...")
+    for epoch in range(1, TRAIN_EPOCHS + 1):
+        model.fit(X_fit_scaled, y_fit)
+        losses.append(model.loss_)
+        val_predictions = model.predict(X_val_scaled)
+        val_score = balanced_accuracy_score(y_val, val_predictions)
+        validation_scores.append(val_score)
+
+        print(f"Época {epoch:03d} | pérdida = {model.loss_:.5f} | validación temporal = {val_score:.2%}")
+
+        if val_score > best_score + 0.0005:
+            best_score = val_score
+            best_state = {
+                "coefs_": [coef.copy() for coef in model.coefs_],
+                "intercepts_": [bias.copy() for bias in model.intercepts_],
+            }
+            patience = 0
+        else:
+            patience += 1
+            if patience >= TRAIN_PATIENCE:
+                print("Parada temprana: la validación temporal dejó de mejorar.")
+                break
+
+    if best_state is not None:
+        model.coefs_ = best_state["coefs_"]
+        model.intercepts_ = best_state["intercepts_"]
+
+    model.loss_curve_ = losses
+    model.n_iter_ = len(losses)
+    model.loss_ = losses[-1]
+    model.validation_scores_ = validation_scores
     return model, scaler
 
 
@@ -200,6 +243,7 @@ def main() -> None:
     print(f"Horizonte: {INTRADAY_HORIZON_BARS} velas")
     print("Arquitectura: 256 → 128 → 64 neuronas")
     print("Validación: 4 bloques temporales fuera de muestra")
+    print("Validación interna: temporal (sin mezclar futuro)")
     print("Modo: SIMULACIÓN / sin broker")
     print()
 
