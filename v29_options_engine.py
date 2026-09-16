@@ -5,50 +5,49 @@ PAPER RESEARCH ONLY. NO BROKER. NO LIVE ORDERS.
 Objetivo de V29:
 - Mantener V27 intacta como cerebro de direccion para NVDA 1H.
 - Convertir una señal alcista de V27 en una compra de CALL.
-- Modelar prima, delta, theta, vencimiento, spread y multiplicador 100.
-- Permitir comparar acciones vs opciones con el mismo punto de entrada.
+- Modelar prima, delta, vencimiento, spread, theta y multiplicador 100.
+- Comparar acciones vs opciones usando exactamente la misma señal.
 
-IMPORTANTE:
-Yahoo/yfinance da historico de OHLC de NVDA, pero no reconstruye una cadena
-historica de opciones completa para cada vela. Por eso V29 tiene dos capas:
-1) modo SYNTHETIC (por defecto): prima Black-Scholes + IV proxy, claramente
-   etiquetada como simulacion; sirve para estudiar la arquitectura y sensibilidad.
-2) modo CSV: preparado para consumir quotes historicas reales con columnas:
-   timestamp,strike,expiration,type,bid,ask[,iv].
+DATOS:
+Yahoo/yfinance ofrece OHLC historico de NVDA, pero no reconstruye una cadena
+historica completa de opciones para cada vela. Por eso V29 tiene un modo
+SYNTHETIC (Black-Scholes + IV proxy) claramente identificado y deja preparada
+una interfaz CSV para quotes historicas reales en una fase posterior.
 
-V29 NO selecciona parametros usando el TEST. Esta version es diagnostica y
-no pretende demostrar rentabilidad de opciones con datos sinteticos.
+Esta version NO usa el TEST para elegir una configuracion. Es diagnostica:
+primero estudiamos si el vehiculo opcion mantiene la ventaja de la señal.
 """
 from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy.stats import norm
 
 import v27_session_aware_v23_plus as v27
 
 INITIAL_CASH = 500.0
 COST = v27.COST
-THRESHOLD = 0.00025  # V27 benchmark: elegido previamente solo con validacion.
+THRESHOLD = 0.00025  # V27 benchmark; elegido previamente solo con validacion.
 MAX_HOLD = v27.MAX_HOLD
 CONTRACT_MULTIPLIER = 100.0
-RISK_FREE = 0.0  # Deliberadamente neutral en la capa sintetica.
+RISK_FREE = 0.0  # Neutro en la capa sintetica.
 TRADING_DAYS_PER_YEAR = 252.0
+HOURS_PER_TRADING_DAY = 6.5
 
-# V29A: no se optimizan con TEST. Son configuraciones para diagnostico.
+# V29A: diagnostico; NO se selecciona un ganador usando el TEST.
 DTE_CANDIDATES = (7, 14, 21, 30)
 TARGET_DELTA_CANDIDATES = (0.55, 0.60, 0.65, 0.70)
 IV_MULT_CANDIDATES = (0.80, 1.00, 1.20)
 SPREAD_CANDIDATES = (0.01, 0.02, 0.04)
+PREMIUM_BUDGET = 0.20  # Como maximo 20% del equity en la prima de una entrada.
 
 
 def norm_cdf(x: float) -> float:
-    return float(norm.cdf(x))
+    """Normal CDF without adding another package dependency."""
+    return 0.5 * (1.0 + math.erf(float(x) / math.sqrt(2.0)))
 
 
 def bs_call(S: float, K: float, T: float, sigma: float, r: float = RISK_FREE) -> float:
@@ -73,26 +72,28 @@ def bs_call_delta(S: float, K: float, T: float, sigma: float, r: float = RISK_FR
 
 
 def strike_for_target_delta(S: float, T: float, sigma: float, target_delta: float, r: float = RISK_FREE) -> float:
-    """Solve the Black-Scholes call strike that gives the requested delta.
-
-    We use a binary search instead of an algebraic shortcut so the same
-    function can later be replaced by a real option-chain selector.
-    """
+    """Solve the strike producing the desired call delta at entry."""
     lo = max(S * 0.20, 0.01)
     hi = S * 2.50
     target_delta = float(np.clip(target_delta, 0.05, 0.95))
     for _ in range(80):
         mid = (lo + hi) / 2.0
-        d = bs_call_delta(S, mid, T, sigma, r)
-        # Higher strike -> lower delta.
-        if d > target_delta:
+        delta = bs_call_delta(S, mid, T, sigma, r)
+        if delta > target_delta:
             lo = mid
         else:
             hi = mid
     return (lo + hi) / 2.0
 
 
+def session_expiry(entry_ts: pd.Timestamp, dte: int) -> pd.Timestamp:
+    """Synthetic expiry at 16:00 NY time after DTE calendar days."""
+    day = entry_ts.normalize() + pd.Timedelta(days=int(dte))
+    return day + pd.Timedelta(hours=16)
+
+
 def realized_iv_proxy(df: pd.DataFrame, end_i: int, iv_mult: float) -> float:
+    """Annualized realized volatility proxy from the last ~48 hourly bars."""
     close = df["Close"].astype(float)
     ret = np.log(close).diff()
     window = ret.iloc[max(0, end_i - 48): end_i + 1].dropna()
@@ -100,38 +101,23 @@ def realized_iv_proxy(df: pd.DataFrame, end_i: int, iv_mult: float) -> float:
         base = 0.50
     else:
         hourly = float(window.std())
-        base = hourly * math.sqrt(TRADING_DAYS_PER_YEAR * 6.5)
+        base = hourly * math.sqrt(TRADING_DAYS_PER_YEAR * HOURS_PER_TRADING_DAY)
     return float(np.clip(base * iv_mult, 0.10, 2.50))
 
 
-def synthetic_option_quote(df: pd.DataFrame, entry_i: int, now_i: int, dte: int, target_delta: float, iv_mult: float) -> dict:
-    """Generate a synthetic quote for one rolling European call."""
-    entry_ts = pd.Timestamp(df.index[entry_i])
-    now_ts = pd.Timestamp(df.index[now_i])
-    expiry_ts = entry_ts.normalize() + pd.Timedelta(days=dte)
-    # If calendar expiry lands outside the stock series, remaining time can still be priced.
-    T_days = max((expiry_ts - now_ts).total_seconds() / 86400.0, 0.0)
-    T = T_days / 365.0
-    S = float(df["Close"].iloc[now_i])
-    sigma = realized_iv_proxy(df, now_i, iv_mult)
-    K = strike_for_target_delta(S, max(T, 1.0 / 3650.0), sigma, target_delta)
+def option_mark(S: float, K: float, expiry_ts: pd.Timestamp, now_ts: pd.Timestamp, sigma: float) -> dict:
+    remaining_days = max((expiry_ts - now_ts).total_seconds() / 86400.0, 0.0)
+    T = remaining_days / 365.0
     mid = bs_call(S, K, T, sigma)
     delta = bs_call_delta(S, K, T, sigma)
-    return {
-        "S": S,
-        "K": K,
-        "T": T,
-        "sigma": sigma,
-        "mid": max(float(mid), 0.0),
-        "delta": float(delta),
-        "expiry": expiry_ts,
-    }
+    return {"mid": max(float(mid), 0.0), "delta": float(delta), "T": T, "sigma": sigma}
 
 
 def load_option_csv(path: str | Path) -> pd.DataFrame:
-    """Load real historical option quotes when available.
+    """Load real historical option quotes when a suitable data source is added.
 
-    Required columns: timestamp,strike,expiration,type,bid,ask
+    Required columns:
+    timestamp,strike,expiration,type,bid,ask
     Optional: iv
     """
     p = Path(path)
@@ -144,7 +130,7 @@ def load_option_csv(path: str | Path) -> pd.DataFrame:
         raise ValueError(f"CSV missing columns: {sorted(missing)}")
     x["timestamp"] = pd.to_datetime(x["timestamp"], utc=True).dt.tz_convert("America/New_York")
     x["expiration"] = pd.to_datetime(x["expiration"], utc=True).dt.tz_convert("America/New_York")
-    x["type"] = x["type"].str.lower()
+    x["type"] = x["type"].astype(str).str.lower()
     for c in ("strike", "bid", "ask"):
         x[c] = pd.to_numeric(x[c], errors="coerce")
     if "iv" in x.columns:
@@ -152,53 +138,26 @@ def load_option_csv(path: str | Path) -> pd.DataFrame:
     return x.dropna(subset=["timestamp", "expiration", "strike", "bid", "ask"])
 
 
-def choose_real_call(chain: pd.DataFrame, ts: pd.Timestamp, dte: int, target_delta: float, stock_px: float) -> pd.Series | None:
-    """Select the nearest real call quote to target DTE/delta.
-
-    A real quote should ideally include IV. If IV is absent, a delta/strike proxy
-    cannot be trusted enough for V29 selection, so we skip that row.
-    """
-    x = chain[(chain["timestamp"] == ts) & (chain["type"] == "call")].copy()
-    if x.empty:
-        return None
-    x["days"] = (x["expiration"] - ts).dt.total_seconds() / 86400.0
-    x = x[(x["days"] > 1) & (x["days"] <= dte * 2.0)]
-    x = x[x["ask"] > 0]
-    if x.empty:
-        return None
-    if "iv" not in x.columns:
-        return None
-    x = x[np.isfinite(x["iv"]) & (x["iv"] > 0)]
-    if x.empty:
-        return None
-    # Approximate delta from BS only for selecting the nearest chain contract.
-    t_years = np.maximum(x["days"].to_numpy(float) / 365.0, 1e-9)
-    sigma = np.maximum(x["iv"].to_numpy(float), 0.05)
-    strike = x["strike"].to_numpy(float)
-    d1 = (np.log(stock_px / strike) + 0.5 * sigma * sigma * t_years) / (sigma * np.sqrt(t_years))
-    x["delta_proxy"] = norm.cdf(d1)
-    x["distance"] = (x["days"] - dte).abs() / max(dte, 1) + (x["delta_proxy"] - target_delta).abs()
-    return x.sort_values("distance").iloc[0]
-
-
 def backtest_synthetic(df: pd.DataFrame, panel: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp,
                        dte: int, target_delta: float, iv_mult: float, spread: float) -> dict:
-    """Backtest one long-call mapping using synthetic option prices.
+    """Backtest a long-call mapping using synthetic option prices.
 
-    Fractional contract-equivalents are allowed intentionally so €500 can be
-    studied even when one real 100-share option contract costs more than the account.
-    This is NOT a statement that a real broker would accept fractional options.
+    Fractional contract-equivalents are intentional for the €500 research account:
+    a real listed stock option normally represents 100 shares and a broker does not
+    have to accept fractional option contracts. This mode is therefore an economic
+    sensitivity study, not a claim of live executability.
     """
     positions = {ts: i for i, ts in enumerate(df.index)}
     signals = panel[(panel.index >= start) & (panel.index < end)]
+
     cash = float(INITIAL_CASH)
     contracts = 0.0
-    entry_i = None
-    entry_premium = None
-    entry_cost = None
-    entry_dte = dte
-    trade_returns = []
-    curve = []
+    entry_i: int | None = None
+    entry_cost = 0.0
+    strike = np.nan
+    expiry_ts: pd.Timestamp | None = None
+    trade_returns: list[float] = []
+    curve: list[float] = []
 
     for signal_ts, row in signals.iterrows():
         i = positions.get(signal_ts)
@@ -209,64 +168,86 @@ def backtest_synthetic(df: pd.DataFrame, panel: pd.DataFrame, start: pd.Timestam
         if execution_ts >= end:
             continue
 
-        bullish = float(row["signal"]) > THRESHOLD
-        # Option mark at the next open is not available at the same close, so use next-bar stock open as S.
         S_exec = float(df["Open"].iloc[execution_i])
         if not np.isfinite(S_exec) or S_exec <= 0:
             continue
 
-        # Build the option using the execution bar as entry anchor.
-        dummy_df = df.copy()
-        dummy_df.iloc[execution_i, dummy_df.columns.get_loc("Close")] = S_exec
-        quote = synthetic_option_quote(dummy_df, execution_i, execution_i, entry_dte, target_delta, iv_mult)
-        mid = quote["mid"]
-        ask = mid * (1.0 + spread / 2.0)
-        bid = mid * max(1.0 - spread / 2.0, 0.05)
+        bullish = float(row["signal"]) > THRESHOLD
+        now_sigma = realized_iv_proxy(df, execution_i, iv_mult)
 
-        equity = cash + contracts * max(bid * CONTRACT_MULTIPLIER, 0.0)
-        option_value = contracts * bid * CONTRACT_MULTIPLIER
+        # Mark existing position using the SAME strike and SAME expiry acquired at entry.
+        if contracts > 0 and entry_i is not None and expiry_ts is not None:
+            current = option_mark(S_exec, strike, expiry_ts, execution_ts, now_sigma)
+            bid = current["mid"] * max(1.0 - spread / 2.0, 0.05)
+            forced_exit = execution_i - entry_i >= MAX_HOLD or current["T"] <= 0
+            if (not bullish) or forced_exit:
+                proceeds = contracts * bid * CONTRACT_MULTIPLIER * (1.0 - COST)
+                cash += proceeds
+                trade_returns.append(proceeds / max(entry_cost, 1e-9) - 1.0)
+                contracts = 0.0
+                entry_i = None
+                entry_cost = 0.0
+                strike = np.nan
+                expiry_ts = None
 
-        # Hard exit at MAX_HOLD bars or option expiry; no naked option selling.
-        forced_exit = contracts > 0 and entry_i is not None and (
-            execution_i - entry_i >= MAX_HOLD or quote["T"] <= 0
-        )
+        # Open a new call only when flat and V27 says bullish.
+        if contracts <= 0 and bullish:
+            expiry = session_expiry(execution_ts, dte)
+            T_entry = max((expiry - execution_ts).total_seconds() / 86400.0, 1.0) / 365.0
+            K = strike_for_target_delta(S_exec, T_entry, now_sigma, target_delta)
+            entry_mid = bs_call(S_exec, K, T_entry, now_sigma)
+            ask = entry_mid * (1.0 + spread / 2.0)
+            if np.isfinite(ask) and ask > 0:
+                equity = cash
+                budget = equity * PREMIUM_BUDGET
+                contract_cost = ask * CONTRACT_MULTIPLIER * (1.0 + COST)
+                qty = budget / contract_cost if contract_cost > 0 else 0.0
+                if qty > 0:
+                    total_cost = qty * contract_cost
+                    cash -= total_cost
+                    contracts = qty
+                    entry_i = execution_i
+                    entry_cost = total_cost
+                    strike = K
+                    expiry_ts = expiry
 
-        if contracts > 0 and (not bullish or forced_exit):
-            proceeds = contracts * bid * CONTRACT_MULTIPLIER
-            cash += proceeds * (1.0 - COST)
-            if entry_cost and entry_cost > 0:
-                trade_returns.append(cash / entry_cost - 1.0)
+        # Mark the open option with the current bar's close.
+        mark_value = 0.0
+        if contracts > 0 and expiry_ts is not None:
+            S_mark = float(df["Close"].iloc[execution_i])
+            mark_sigma = realized_iv_proxy(df, execution_i, iv_mult)
+            marked = option_mark(S_mark, strike, expiry_ts, execution_ts, mark_sigma)
+            bid = marked["mid"] * max(1.0 - spread / 2.0, 0.05)
+            mark_value = contracts * bid * CONTRACT_MULTIPLIER
+        curve.append(cash + mark_value)
+
+    # Conservative final liquidation at the last bar available before end.
+    if contracts > 0 and expiry_ts is not None:
+        last_candidates = df[(df.index >= start) & (df.index < end)]
+        if not last_candidates.empty:
+            last_ts = last_candidates.index[-1]
+            last_i = positions[last_ts]
+            S_last = float(df["Close"].iloc[last_i])
+            sigma_last = realized_iv_proxy(df, last_i, iv_mult)
+            marked = option_mark(S_last, strike, expiry_ts, last_ts, sigma_last)
+            bid = marked["mid"] * max(1.0 - spread / 2.0, 0.05)
+            proceeds = contracts * bid * CONTRACT_MULTIPLIER * (1.0 - COST)
+            cash += proceeds
+            trade_returns.append(proceeds / max(entry_cost, 1e-9) - 1.0)
             contracts = 0.0
-            entry_i = None
-            entry_premium = None
-            entry_cost = None
-
-        elif contracts <= 0 and bullish and mid > 0:
-            # Never spend more than 20% of equity on premium in this diagnostic layer.
-            budget = equity * 0.20
-            contract_cost = ask * CONTRACT_MULTIPLIER * (1.0 + COST)
-            if contract_cost > 0 and budget > 0:
-                new_contracts = budget / contract_cost
-                cash -= new_contracts * contract_cost
-                contracts = new_contracts
-                entry_i = execution_i
-                entry_premium = ask
-                entry_cost = cash + contracts * entry_premium * CONTRACT_MULTIPLIER
-
-        # Mark open options at the current bar's close.
-        mark = bid
-        curve.append(cash + contracts * mark * CONTRACT_MULTIPLIER)
+            curve.append(cash)
 
     if len(curve) < 2:
-        return {"return": 0.0, "final": INITIAL_CASH, "trades": 0, "max_dd": 0.0, "sharpe": 0.0, "win_rate": 0.0}
+        return {"return": 0.0, "final": INITIAL_CASH, "trades": 0,
+                "max_dd": 0.0, "sharpe": 0.0, "win_rate": 0.0}
 
-    curve = np.asarray(curve, dtype=float)
-    peak = np.maximum.accumulate(curve)
-    max_dd = float(np.min(curve / peak - 1.0))
-    rets = curve[1:] / np.maximum(curve[:-1], 1e-9) - 1.0
-    sharpe = float(np.mean(rets) / (np.std(rets) + 1e-12) * np.sqrt(252 * 6.5)) if len(rets) > 20 else 0.0
+    curve_arr = np.asarray(curve, dtype=float)
+    peak = np.maximum.accumulate(curve_arr)
+    max_dd = float(np.min(curve_arr / np.maximum(peak, 1e-9) - 1.0))
+    rets = curve_arr[1:] / np.maximum(curve_arr[:-1], 1e-9) - 1.0
+    sharpe = float(np.mean(rets) / (np.std(rets) + 1e-12) * math.sqrt(252 * 6.5)) if len(rets) > 20 else 0.0
     win_rate = float(np.mean(np.asarray(trade_returns) > 0)) if trade_returns else 0.0
-    final = float(curve[-1])
+    final = float(curve_arr[-1])
     return {
         "return": final / INITIAL_CASH - 1.0,
         "final": final,
@@ -292,8 +273,9 @@ def main() -> None:
     test_start = val_cut + 2
 
     print("=== V29 | OPTIONS ENGINE | NVDA 1H | capital=500 EUR ===", flush=True)
-    print("Modo: SYNTHETIC Black-Scholes + IV proxy (NO son quotes historicas reales).", flush=True)
-    print("V27 queda intacta como cerebro; V29 solo cambia el vehiculo de ejecucion.", flush=True)
+    print("Modo: SYNTHETIC Black-Scholes + IV proxy.", flush=True)
+    print("NO son precios historicos reales de opciones y NO hay broker/live orders.", flush=True)
+    print("V27 queda intacta como cerebro; V29 cambia solo el vehiculo de ejecucion.", flush=True)
     print("Generando panel V27...", flush=True)
     panel = v27.sequential_predictions(df, train_cut, n - 1)
     if panel.empty:
@@ -307,18 +289,24 @@ def main() -> None:
     print(f"Validacion: {vs} -> {ve}")
     print(f"Test ciego: {ts} -> {te}")
     print(f"Threshold V27 fijo={THRESHOLD:+.3%} | MAX_HOLD={MAX_HOLD} | coste/lado={COST:.3%}")
+    print(f"Premium budget={PREMIUM_BUDGET:.0%} | multiplicador={CONTRACT_MULTIPLIER:.0f}")
 
     rows = []
-    print("\n=== V29A DIAGNOSTICO | SOLO PARA COMPARAR ESTRUCTURAS ===")
+    print("\n=== V29A DIAGNOSTICO | COMPARACION DE ESTRUCTURAS ===")
     for dte in DTE_CANDIDATES:
         for delta in TARGET_DELTA_CANDIDATES:
             for ivm in IV_MULT_CANDIDATES:
                 for spr in SPREAD_CANDIDATES:
                     val = backtest_synthetic(df, panel, vs, ve, dte, delta, ivm, spr)
                     test = backtest_synthetic(df, panel, ts, te, dte, delta, ivm, spr)
-                    rows.append({"dte": dte, "delta": delta, "iv_mult": ivm, "spread": spr,
-                                 **{f"val_{k}": v for k, v in val.items()},
-                                 **{f"test_{k}": v for k, v in test.items()}})
+                    rows.append({
+                        "dte": dte,
+                        "delta": delta,
+                        "iv_mult": ivm,
+                        "spread": spr,
+                        **{f"val_{k}": v for k, v in val.items()},
+                        **{f"test_{k}": v for k, v in test.items()},
+                    })
                     print(
                         f"DTE={dte:2d} | delta={delta:.2f} | IVx={ivm:.2f} | spread={spr:.0%} | "
                         f"VAL={val['return']:+.2%} DD={val['max_dd']:.2%} trades={val['trades']:3d} | "
@@ -339,7 +327,7 @@ def main() -> None:
     print(f"TEST B&H:   {bh_test:+.2%}")
     print("\n=== ARCHIVO ===")
     print(f"Guardado {output_path}")
-    print("NO escoger configuracion ganadora con el TEST. La seleccion robusta vendra en V30 sobre VALIDACION.")
+    print("NO escoger configuracion con el TEST. La seleccion robusta vendra despues sobre VALIDACION.")
     print("runtime={:.1f} min".format((time.time() - t0) / 60.0))
 
 
