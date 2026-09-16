@@ -10,8 +10,8 @@ Genera UNA SOLA VENTANA con:
 5) Marcadores de ENTRADA y SALIDA ejecutados al siguiente OPEN.
 6) Etiquetas con hora para inspeccionar especialmente la apertura.
 
-No guarda imagen en disco. Al cerrar la ventana imprime en consola el resumen
-con los mismos datos clave de la visualizacion.
+No guarda imagen en disco. Al cerrar la ventana imprime primero los datos
+completos de referencia V16.7 y despues el detalle de la ventana visualizada.
 """
 from __future__ import annotations
 
@@ -99,7 +99,6 @@ def candle_ax(ax, data):
     for xi, (ts, row) in zip(x, data.iterrows()):
         o, h, l, c = [float(row[k]) for k in ("Open", "High", "Low", "Close")]
         up = c >= o
-        # Slightly different treatment on alternating days so whole sessions are easy to separate.
         day_idx = day_to_num[ts.normalize()]
         alpha = 0.78 if day_idx % 2 == 0 else 0.92
         ax.vlines(xi, l, h, linewidth=0.8, alpha=alpha)
@@ -111,6 +110,22 @@ def candle_ax(ax, data):
                          edgecolor="black",
                          facecolor="white" if up else "black")
         ax.add_patch(rect)
+
+
+def print_reference_summary(df, panel, vs, ve, ts, te):
+    """Print the same high-level figures shown by V16.7, but with fixed V24 params."""
+    print("\n" + "=" * 68)
+    print("DATOS DE REFERENCIA — MODELO V16.7 / CONFIGURACION V24")
+    print("=" * 68)
+    print(f"asset={v16.ASSET} | candles={v16.INTERVAL} | history={v16.PERIOD}")
+    print(f"context={v16.LOOKBACK_BARS} bars (~10 trading days) | prediction=NEXT 1H candle")
+    print(f"max_hold usado en V24={MAX_HOLD} barras (~{MAX_HOLD/6.5:.1f} trading days)")
+    print(f"data={df.index[0]} -> {df.index[-1]} | total_bars={len(df)}")
+    print(f"validation={vs} -> {ve}")
+    print(f"test={ts} -> {te}")
+    print(f"config V24: threshold={THRESHOLD:.2%} | max_weight={WEIGHT:.0%} | coste/lado={COST:.3%}")
+    print("NOTA: V24 no vuelve a seleccionar parametros; usa el umbral fijo 0.175% para inspeccion visual.")
+    print("=" * 68)
 
 
 def main():
@@ -146,7 +161,6 @@ def main():
     ax1.set_ylabel("Precio NVDA")
     ax1.grid(alpha=0.18)
 
-    # Diferencia visual por sesiones/dias.
     unique_days = list(view.index.normalize().unique())
     for day_idx, d in enumerate(unique_days):
         day_data = view.loc[view.index.normalize() == d]
@@ -208,8 +222,11 @@ def main():
              "Fondo alterno = dia distinto. Lineas verticales = apertura 09:30 ET.", fontsize=9)
     plt.tight_layout(rect=(0, 0.03, 1, 0.96))
     print(f"Ventana: {start} -> {end} | velas={len(view)} | eventos={len(events)}")
-    print("Se abre ahora la ventana de matplotlib. Cierra la ventana para ver el resumen final en consola.")
+    print("Se abre ahora la ventana de matplotlib. Cierra la ventana para ver TODOS los datos en consola.")
     plt.show()
+
+    # First print the full-model / experiment context, then the detailed visual window.
+    print_reference_summary(df, panel, vs, ve, ts, te)
 
     print("\n" + "=" * 68)
     print("RESUMEN V24 — DATOS DE LA VENTANA")
