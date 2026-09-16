@@ -2,9 +2,16 @@
 
 Paper research only. No live orders.
 
-Genera UNA SOLA VENTANA con velas compactas, separacion visual por dia,
-senal continua de la IA, probabilidad alcista y eventos BUY/SELL.
-No guarda PNG: la figura solo se muestra en pantalla.
+Genera UNA SOLA VENTANA con:
+1) Velas OHLC de la zona seleccionada.
+2) Separacion visual por dias/sesiones.
+3) Senal continua de la IA y umbral usado.
+4) Probabilidad alcista de la clasificacion.
+5) Marcadores de ENTRADA y SALIDA ejecutados al siguiente OPEN.
+6) Etiquetas con hora para inspeccionar especialmente la apertura.
+
+No guarda imagen en disco. Al cerrar la ventana imprime en consola el resumen
+con los mismos datos clave de la visualizacion.
 """
 from __future__ import annotations
 
@@ -21,9 +28,6 @@ WEIGHT = 1.0
 COST = v16.COST
 INITIAL_CASH = v16.INITIAL_CASH
 PLOT_BARS = 350
-
-# Colores solo para diferenciar visualmente cada dia de mercado.
-DAY_COLORS = ("#e8f1ff", "#fff4df", "#e9f7e9", "#f6e8ff", "#ffe8ee")
 
 
 def make_trades(df, panel, start, end):
@@ -82,46 +86,31 @@ def make_trades(df, panel, start, end):
 
 
 def candle_ax(ax, data):
-    # Convert timestamps to ordinal floats and make candles nearly touch each other.
     x = mdates.date2num(data.index.to_pydatetime())
     if len(x) > 1:
-        width = float(np.median(np.diff(x))) * 0.96
+        width = float(np.median(np.diff(x))) * 0.92
     else:
-        width = 0.03
+        width = 0.02
 
-    for xi, (_, row) in zip(x, data.iterrows()):
+    day_keys = data.index.normalize()
+    days = pd.Index(day_keys).unique()
+    day_to_num = {day: idx for idx, day in enumerate(days)}
+
+    for xi, (ts, row) in zip(x, data.iterrows()):
         o, h, l, c = [float(row[k]) for k in ("Open", "High", "Low", "Close")]
         up = c >= o
-        ax.vlines(xi, l, h, linewidth=0.75, color="black", alpha=0.8)
+        # Slightly different treatment on alternating days so whole sessions are easy to separate.
+        day_idx = day_to_num[ts.normalize()]
+        alpha = 0.78 if day_idx % 2 == 0 else 0.92
+        ax.vlines(xi, l, h, linewidth=0.8, alpha=alpha)
         bottom = min(o, c)
         height = max(abs(c - o), max(abs(c), 1.0) * 1e-5)
-        rect = Rectangle(
-            (xi - width / 2, bottom), width, height,
-            fill=True, alpha=0.82, linewidth=0.45,
-            edgecolor="black", facecolor="white" if up else "black"
-        )
+        rect = Rectangle((xi - width / 2, bottom), width, height,
+                         fill=True, alpha=alpha,
+                         linewidth=0.65,
+                         edgecolor="black",
+                         facecolor="white" if up else "black")
         ax.add_patch(rect)
-
-
-def shade_days(ax, index, alpha=0.22):
-    days = pd.Index(index.normalize().unique()).sort_values()
-    for j, day in enumerate(days):
-        day_start = day + pd.Timedelta(hours=9, minutes=30)
-        day_end = day + pd.Timedelta(hours=16)
-        color = DAY_COLORS[j % len(DAY_COLORS)]
-        ax.axvspan(day_start, day_end, facecolor=color, alpha=alpha, linewidth=0)
-        ax.axvline(day_start, linewidth=0.55, alpha=0.38, color="black")
-
-
-def add_day_labels(ax, index):
-    days = pd.Index(index.normalize().unique()).sort_values()
-    for day in days:
-        ts = day + pd.Timedelta(hours=9, minutes=35)
-        ax.text(
-            ts, 0.99, day.strftime("%d/%m"),
-            transform=ax.get_xaxis_transform(), ha="left", va="top",
-            fontsize=7, alpha=0.65
-        )
 
 
 def main():
@@ -147,46 +136,48 @@ def main():
     if pv.empty:
         raise RuntimeError("La ventana elegida no contiene predicciones")
 
-    events, _equity = make_trades(df, panel, start, end)
+    events, equity = make_trades(df, panel, start, end)
 
-    fig, (ax1, ax2) = plt.subplots(
-        2, 1, figsize=(17, 10), sharex=True,
-        gridspec_kw={"height_ratios": [3.8, 1.35]}
-    )
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(17, 10), sharex=True,
+                                   gridspec_kw={"height_ratios": [3.6, 1.25]})
     fig.suptitle("IA-Trade V24 — NVDA 1H | velas + prediccion + operaciones", fontsize=15)
 
-    # Fondo alterno por dia para que el cierre de un dia y apertura del siguiente sean evidentes.
-    shade_days(ax1, view.index, alpha=0.32)
-    shade_days(ax2, view.index, alpha=0.18)
     candle_ax(ax1, view)
-    add_day_labels(ax1, view.index)
     ax1.set_ylabel("Precio NVDA")
-    ax1.grid(alpha=0.14)
+    ax1.grid(alpha=0.18)
 
-    # Marcador fuerte de apertura 09:30 ET de cada dia.
-    for d in pd.Index(view.index.normalize().unique()).sort_values():
+    # Diferencia visual por sesiones/dias.
+    unique_days = list(view.index.normalize().unique())
+    for day_idx, d in enumerate(unique_days):
+        day_data = view.loc[view.index.normalize() == d]
+        if day_data.empty:
+            continue
+        day_start = day_data.index[0]
+        day_end = day_data.index[-1]
+        if day_idx % 2 == 1:
+            ax1.axvspan(day_start, day_end + pd.Timedelta(minutes=30), alpha=0.055)
         session_open = d + pd.Timedelta(hours=9, minutes=30)
-        ax1.axvline(session_open, linewidth=0.8, alpha=0.5, color="black", linestyle="--")
+        if start <= session_open <= end:
+            ax1.axvline(session_open, linewidth=0.7, alpha=0.22)
 
     for ts0, kind, px, sig, prob, reason in events:
-        label = kind
         if kind == "BUY":
-            ax1.scatter(ts0, px, marker="^", s=90, zorder=6, label=label if label not in ax1.get_legend_handles_labels()[1] else "")
+            ax1.scatter(ts0, px, marker="^", s=90, zorder=6, label="BUY" if "BUY" not in ax1.get_legend_handles_labels()[1] else "")
             ax1.annotate(f"BUY\n{ts0.strftime('%H:%M')}", (ts0, px), xytext=(0, 12), textcoords="offset points", ha="center", fontsize=8)
         else:
-            ax1.scatter(ts0, px, marker="v", s=90, zorder=6, label=label if label not in ax1.get_legend_handles_labels()[1] else "")
+            ax1.scatter(ts0, px, marker="v", s=90, zorder=6, label="SELL" if "SELL" not in ax1.get_legend_handles_labels()[1] else "")
             ax1.annotate(f"SELL\n{ts0.strftime('%H:%M')}", (ts0, px), xytext=(0, -28), textcoords="offset points", ha="center", fontsize=8)
 
     if ve >= start and vs <= end:
-        ax1.axvspan(max(start, vs), min(end, ve), alpha=0.05, color="gray", label="validacion")
+        ax1.axvspan(max(start, vs), min(end, ve), alpha=0.04, label="validacion")
     if te >= start and ts <= end:
-        ax1.axvspan(max(start, ts), min(end, te), alpha=0.05, color="silver", label="test")
+        ax1.axvspan(max(start, ts), min(end, te), alpha=0.06, label="test")
 
     ax2.plot(pv.index, pv["signal"], linewidth=1.2, label="senal IA")
     ax2.axhline(THRESHOLD, linestyle="--", linewidth=1.0, label=f"umbral {THRESHOLD:.3%}")
     ax2.axhline(0, linewidth=0.7, alpha=0.5)
     ax2.set_ylabel("Señal")
-    ax2.grid(alpha=0.14)
+    ax2.grid(alpha=0.18)
 
     ax2b = ax2.twinx()
     ax2b.plot(pv.index, pv["prob_up"], linewidth=0.9, alpha=0.55, label="prob_up")
@@ -194,8 +185,14 @@ def main():
     ax2b.set_ylabel("Prob. alcista")
     ax2b.set_ylim(0, 1)
 
-    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m %H:%M"))
-    ax2.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=10, maxticks=20))
+    for d in unique_days:
+        session_open = d + pd.Timedelta(hours=9, minutes=30)
+        if start <= session_open <= end:
+            ax2.axvline(session_open, linewidth=0.7, alpha=0.22)
+
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d\n%H:%M"))
+    ax2.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=8, maxticks=16))
+    fig.autofmt_xdate(rotation=0)
 
     h1, l1 = ax1.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
@@ -204,18 +201,44 @@ def main():
     for h, l in list(zip(h1, l1)) + list(zip(h2, l2)) + list(zip(h3, l3)):
         if l and l not in seen:
             seen.add(l); hh.append(h); ll.append(l)
-    ax1.legend(hh, ll, loc="upper left", ncol=4, fontsize=8)
+    ax1.legend(hh, ll, loc="upper left", ncol=3, fontsize=8)
 
-    fig.text(
-        0.01, 0.01,
-        "▲ BUY / ▼ SELL = ejecucion al OPEN siguiente. Fondo alterno = dia distinto. "
-        "Línea discontinua negra = apertura 09:30 ET. Abajo: señal IA + umbral + probabilidad alcista.",
-        fontsize=9
-    )
-    plt.tight_layout(rect=(0, 0.035, 1, 0.96))
+    fig.text(0.01, 0.01,
+             "▲ BUY / ▼ SELL = ejecucion al OPEN siguiente. Linea inferior = señal IA. "
+             "Fondo alterno = dia distinto. Lineas verticales = apertura 09:30 ET.", fontsize=9)
+    plt.tight_layout(rect=(0, 0.03, 1, 0.96))
     print(f"Ventana: {start} -> {end} | velas={len(view)} | eventos={len(events)}")
-    print("Se abre ahora la ventana de matplotlib. No se guarda ningun PNG. Cierra la ventana para terminar el programa.")
+    print("Se abre ahora la ventana de matplotlib. Cierra la ventana para ver el resumen final en consola.")
     plt.show()
+
+    print("\n" + "=" * 68)
+    print("RESUMEN V24 — DATOS DE LA VENTANA")
+    print("=" * 68)
+    print(f"Periodo mostrado: {start} -> {end}")
+    print(f"Velas mostradas: {len(view)}")
+    print(f"Eventos BUY/SELL: {len(events)}")
+    print(f"Umbral IA: {THRESHOLD:.3%}")
+    print(f"Max hold: {MAX_HOLD} barras")
+    print(f"Coste por lado: {COST:.3%}")
+    if events:
+        buys = sum(1 for e in events if e[1] == "BUY")
+        sells = sum(1 for e in events if e[1] == "SELL")
+        print(f"Compras: {buys} | Ventas: {sells}")
+        print("\nEventos:")
+        for ts0, kind, px, sig, prob, reason in events:
+            print(f"  {ts0} | {kind:4s} | precio_open={px:.2f} | señal={sig:+.5f} | prob_up={prob:.1%} | motivo={reason}")
+    else:
+        print("No hubo operaciones en la ventana mostrada.")
+    if len(equity) > 1:
+        final_equity = float(equity.iloc[-1])
+        ret = final_equity / INITIAL_CASH - 1.0
+        peak = equity.cummax()
+        dd = float((equity / peak - 1.0).min())
+        print(f"\nCartera en ventana: €{INITIAL_CASH:.2f} -> €{final_equity:.2f} ({ret:+.2%})")
+        print(f"Max drawdown de la ventana: {dd:.2%}")
+    else:
+        print("No hay suficiente curva de equity para calcular retorno/DD.")
+    print("=" * 68)
 
 
 if __name__ == "__main__":
