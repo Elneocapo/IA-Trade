@@ -19,7 +19,7 @@ import yfinance as yf
 from matplotlib.patches import Rectangle
 from sklearn.ensemble import ExtraTreesClassifier, HistGradientBoostingRegressor
 
-# Silence only the known sklearn/joblib warning, including spawned workers.
+# Silence only the known sklearn/joblib warning.
 os.environ.setdefault("PYTHONWARNINGS", "ignore:.*sklearn.utils.parallel.delayed.*:UserWarning")
 warnings.filterwarnings("ignore", message=r".*sklearn\.utils\.parallel\.delayed.*", category=UserWarning)
 warnings.filterwarnings("ignore")
@@ -72,17 +72,16 @@ def fit_set(X,y1,y3,y6,c1,c3,c6):
     return {
         "r1a":HistGradientBoostingRegressor(**a).fit(X,y1),"r3a":HistGradientBoostingRegressor(**a).fit(X,y3),"r6a":HistGradientBoostingRegressor(**a).fit(X,y6),
         "r1b":HistGradientBoostingRegressor(**b).fit(X,y1),"r3b":HistGradientBoostingRegressor(**b).fit(X,y3),"r6b":HistGradientBoostingRegressor(**b).fit(X,y6),
-        "c1":ExtraTreesClassifier(n_estimators=260,max_depth=9,min_samples_leaf=10,max_features=0.60,class_weight="balanced",n_jobs=-1,random_state=59).fit(X,c1),
-        "c3":ExtraTreesClassifier(n_estimators=260,max_depth=8,min_samples_leaf=12,max_features=0.65,class_weight="balanced",n_jobs=-1,random_state=83).fit(X,c3),
-        "c6":ExtraTreesClassifier(n_estimators=220,max_depth=8,min_samples_leaf=14,max_features=0.60,class_weight="balanced",n_jobs=-1,random_state=97).fit(X,c6),
+        "c1":ExtraTreesClassifier(n_estimators=260,max_depth=9,min_samples_leaf=10,max_features=0.60,class_weight="balanced",n_jobs=1,random_state=59).fit(X,c1),
+        "c3":ExtraTreesClassifier(n_estimators=260,max_depth=8,min_samples_leaf=12,max_features=0.65,class_weight="balanced",n_jobs=1,random_state=83).fit(X,c3),
+        "c6":ExtraTreesClassifier(n_estimators=220,max_depth=8,min_samples_leaf=14,max_features=0.60,class_weight="balanced",n_jobs=1,random_state=97).fit(X,c6),
     }
 
 
 def predict_panel(df,start_i,end_i):
     f=make_features(df); c=df["Close"].astype(float); ret1=c.shift(-1)/c-1; ret3=c.shift(-3)/c-1; ret6=c.shift(-6)/c-1; scale=f["vol6"].clip(lower=0.0005)
     y1=ret1/scale; y3=ret3/scale; y6=ret6/scale; c1=(ret1>0.0015).astype(int); c3=(ret3>0.0015).astype(int); c6=(ret6>0.0020).astype(int); X=f.to_numpy(float); arrs=[q.to_numpy(float) for q in (y1,y3,y6,c1,c3,c6)]
-    valid=[i for i in range(LOOKBACK-1,len(df)-6) if start_i<=i<end_i and np.isfinite(X[i]).all() and all(np.isfinite(q[i]) for q in arrs[:3])]
-    models=None; last_fit=-10**9; out=[]; t=time.time()
+    valid=[i for i in range(LOOKBACK-1,len(df)-6) if start_i<=i<end_i and np.isfinite(X[i]).all() and all(np.isfinite(q[i]) for q in arrs[:3])]; models=None; last_fit=-10**9; out=[]; t=time.time()
     for n,i in enumerate(valid,1):
         if models is None or i-last_fit>=RETRAIN_EVERY:
             idx=np.arange(max(LOOKBACK-1,i-TRAIN_WINDOW),i); good=np.isfinite(X[idx]).all(axis=1)
@@ -91,8 +90,7 @@ def predict_panel(df,start_i,end_i):
             if len(idx)>=450: models=fit_set(X[idx],y1.to_numpy()[idx],y3.to_numpy()[idx],y6.to_numpy()[idx],c1.to_numpy()[idx].astype(int),c3.to_numpy()[idx].astype(int),c6.to_numpy()[idx].astype(int)); last_fit=i
         if models is None: continue
         row=X[i].reshape(1,-1); p1=.5*(models["r1a"].predict(row)[0]+models["r1b"].predict(row)[0]); p3=.5*(models["r3a"].predict(row)[0]+models["r3b"].predict(row)[0]); p6=.5*(models["r6a"].predict(row)[0]+models["r6b"].predict(row)[0]); prob1=float(models["c1"].predict_proba(row)[0,1]); prob3=float(models["c3"].predict_proba(row)[0,1]); prob6=float(models["c6"].predict_proba(row)[0,1]); prob=.50*prob1+.32*prob3+.18*prob6; s=max(float(scale.iloc[i]),.0005); r1=float(p1*s); r3=float(p3*s/3); r6=float(p6*s/6); base=.55*r1+.29*r3+.16*r6; conf=np.clip((prob-.5)*2,-1,1); trend=float(f["trend_agreement"].iloc[i]); boost=1.10 if trend>0 else (.90 if trend<0 else 1.0); dispersion=float(np.std([r1,r3,r6])); disagreement=np.clip(dispersion/(abs(base)+s*.15+1e-9),0,2); quality=np.clip(1-.20*disagreement,.55,1.0); vol_reg=float(f["vol_regime"].iloc[i]); vol_penalty=1.0 if .65<=vol_reg<=1.90 else .88; signal=base*(.68+.84*max(conf,0))*boost*quality*vol_penalty; consensus=float(np.mean([r1>0,r3>0,r6>0])); out.append((df.index[i],signal,prob,consensus,r1,r3,r6,quality,vol_reg,disagreement))
-        if n==1 or n%200==0 or n==len(valid):
-            elapsed=time.time()-t; rate=n/max(elapsed,1e-9); eta=(len(valid)-n)/max(rate,1e-9); print(f"prediction {n}/{len(valid)} | {rate:.1f} bars/s | ETA ~{eta/60:.1f} min",flush=True)
+        if n==1 or n%200==0 or n==len(valid): elapsed=time.time()-t; rate=n/max(elapsed,1e-9); eta=(len(valid)-n)/max(rate,1e-9); print(f"prediction {n}/{len(valid)} | {rate:.1f} bars/s | ETA ~{eta/60:.1f} min",flush=True)
     return pd.DataFrame(out,columns=["date","signal","prob_consensus","consensus","pred1","pred3","pred6","signal_quality","vol_regime","model_disagreement"]).set_index("date")
 
 
@@ -165,15 +163,15 @@ def option_backtest(df,panel,start,end,threshold,minimum_consensus,min_hold,conf
         opt_mid=np.nan; delta=np.nan; T=np.nan; value=0.
         if contracts>0 and expiry is not None:
             opt_mid,delta,T=option_mark(float(df["Close"].iloc[ex]),strike,expiry,ts,iv_proxy(df,ex)); bid=opt_mid*max(1-OPTION_SPREAD/2,.05); value=contracts*bid*CONTRACT_MULTIPLIER
-        equity=cash+value; trace.append((ts,float(df["Open"].iloc[ex]),float(df["High"].iloc[ex]),float(df["Low"].iloc[ex]),float(df["Close"].iloc[ex]),signal_ts,float(row["signal"]),float(row["prob_consensus"]),strike,expiry,contracts,opt_mid,delta,T,cash,value,equity,event))
-        curve.append(equity)
+        equity=cash+value; trace.append((ts,float(df["Open"].iloc[ex]),float(df["High"].iloc[ex]),float(df["Low"].iloc[ex]),float(df["Close"].iloc[ex]),signal_ts,float(row["signal"]),float(row["prob_consensus"]),strike,expiry,contracts,opt_mid,delta,T,cash,value,equity,event)); curve.append(equity)
     if contracts>0 and expiry is not None:
         last_candidates=df[(df.index>=start)&(df.index<end)]
         if not last_candidates.empty:
             last_ts=last_candidates.index[-1]; li=pos[last_ts]; S=float(df["Close"].iloc[li]); marked=option_mark(S,strike,expiry,last_ts,iv_proxy(df,li)); bid=marked[0]*max(1-OPTION_SPREAD/2,.05); proceeds=contracts*bid*CONTRACT_MULTIPLIER*(1-COST); cash+=proceeds; trades.append(proceeds/max(entry_cost,1e-9)-1); durations.append(max(li-entry_i,0)); contracts=0.; curve.append(cash)
     if len(curve)<2:return {"final":INITIAL_CASH,"ret":0.,"dd":0.,"sharpe":0.,"trades":0,"wr":0.,"avg_hold":0.,"trace":pd.DataFrame()}
     a=np.asarray(curve,float); peak=np.maximum.accumulate(a); dd=float(np.min(a/np.maximum(peak,1e-9)-1)); rr=a[1:]/np.maximum(a[:-1],1e-9)-1; sh=float(np.mean(rr)/(np.std(rr)+1e-12)*math.sqrt(252*6.5)) if len(rr)>20 else 0.; final=float(a[-1]); wr=float(np.mean(np.asarray(trades)>0)) if trades else 0.; avg=float(np.mean(durations)) if durations else 0.
-    return {"final":final,"ret":final/INITIAL_CASH-1.,"dd":dd,"sharpe":sh,"trades":len(trades),"wr":wr,"avg_hold":avg,"trace":pd.DataFrame(trace,columns=["ts","open","high","low","close","signal_ts","signal","prob","strike","expiry","contracts","option_mid","delta","T","cash","option_value","equity","event"]).set_index("ts")}
+    trace_df=pd.DataFrame(trace,columns=["ts","open","high","low","close","signal_ts","signal","prob","strike","expiry","contracts","option_mid","delta","T","cash","option_value","equity","event"]).set_index("ts")
+    return {"final":final,"ret":final/INITIAL_CASH-1.,"dd":dd,"sharpe":sh,"trades":len(trades),"wr":wr,"avg_hold":avg,"trace":trace_df}
 
 
 def option_score(r): return r["ret"]-.60*abs(min(r["dd"],0))+.02*max(r["sharpe"],0)-.001*max(0,5-r["trades"])
@@ -183,17 +181,12 @@ def candlestick_axes(ax,x):
     if x.empty:return
     xs=mdates.date2num(pd.to_datetime(x.index).to_pydatetime()); step=float(np.median(np.diff(xs))) if len(xs)>1 else 1/24; width=step*.62
     for d,o,h,l,c in zip(xs,x["open"],x["high"],x["low"],x["close"]):
-        up=c>=o; ax.vlines(d,l,h,linewidth=.9); bottom=min(o,c); height=max(abs(c-o),1e-8); ax.add_patch(Rectangle((d-width/2,bottom),width,height,fill=True,alpha=.65))
+        ax.vlines(d,l,h,linewidth=.9); bottom=min(o,c); height=max(abs(c-o),1e-8); ax.add_patch(Rectangle((d-width/2,bottom),width,height,fill=True,alpha=.65))
     ax.xaxis_date(); ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d")); ax.grid(alpha=.2)
 
 
 def plot_candles_and_calls(df,trace,title):
-    x=trace.copy()
-    fig,ax=plt.subplots(figsize=(15,8)); candlestick_axes(ax,x); ax.set_title(title); ax.set_ylabel("NVDA price")
-    buys=x["event"].astype(str).str.startswith("BUY CALL"); sells=x["event"].astype(str).str.startswith("SELL CALL")
-    ax.scatter(x.index[buys],x.loc[buys,"low"]*.995,marker="^",s=65,label="CALL entry"); ax.scatter(x.index[sells],x.loc[sells,"high"]*1.005,marker="v",s=65,label="CALL exit")
-    active=x["strike"].notna(); ax.plot(x.index.where(active),x["strike"],linewidth=1.1,label="CALL strike")
-    ax.legend(loc="upper left"); fig.tight_layout(); plt.show(block=False)
+    x=trace.copy(); fig,ax=plt.subplots(figsize=(15,8)); candlestick_axes(ax,x); ax.set_title(title); ax.set_ylabel("NVDA price"); buys=x["event"].astype(str).str.startswith("BUY CALL"); sells=x["event"].astype(str).str.startswith("SELL CALL"); ax.scatter(x.index[buys],x.loc[buys,"low"]*.995,marker="^",s=65,label="CALL entry"); ax.scatter(x.index[sells],x.loc[sells,"high"]*1.005,marker="v",s=65,label="CALL exit"); active=x["strike"].notna(); ax.plot(x.index.where(active),x["strike"],linewidth=1.1,label="CALL strike"); ax.legend(loc="upper left"); fig.tight_layout(); plt.show(block=False)
 
 
 def plot_equity(trace):
@@ -201,8 +194,7 @@ def plot_equity(trace):
 
 
 def main():
-    t0=time.time(); df=load_data(); n=len(df); cut1=int(n*.60); cut2=int(n*.80); test_start=cut2+2
-    print("=== V31 ROBUST AI | NVDA 1H | PAPER OPTIONS RESEARCH ==="); print(f"Capital inicial: €{INITIAL_CASH:.2f}"); print("Modo opciones: SYNTHETIC Black-Scholes + IV proxy (no quotes historicos reales)"); print("Generando predicciones...",flush=True)
+    t0=time.time(); df=load_data(); n=len(df); cut1=int(n*.60); cut2=int(n*.80); test_start=cut2+2; print("=== V31 ROBUST AI | NVDA 1H | PAPER OPTIONS RESEARCH ==="); print(f"Capital inicial: €{INITIAL_CASH:.2f}"); print("Modo opciones: SYNTHETIC Black-Scholes + IV proxy (no quotes historicos reales)"); print("Generando predicciones...",flush=True)
     panel=predict_panel(df,cut1,n-1)
     if panel.empty:raise RuntimeError("No predictions generated")
     val=panel.index[panel.index<df.index[cut2]]; test=panel.index[panel.index>=df.index[test_start]]; vs,ve=val[0],val[-1]; ts,te=test[0],test[-1]; print(f"Validacion: {vs} -> {ve}"); print(f"Test ciego: {ts} -> {te}")
@@ -210,21 +202,11 @@ def main():
     for th in THRESHOLDS:
         for con in CONSENSUS:
             r=backtest(df,panel,vs,ve,th,con); r.update(threshold=th,consensus=con,score=score(r)); print(f"threshold={th:+.3%} | consensus>={con:.2f} | ret={r['ret']:+.2%} | trades={r['trades']} | DD={r['dd']:.2%} | Sharpe={r['sharpe']:.2f} | WR={r['wr']:.1%} | score={r['score']:+.4f}"); best=r if best is None or r["score"]>best["score"] else best
-    print("\n=== ELEGIDO | VALIDACION ONLY ==="); print(f"threshold={best['threshold']:+.3%} | min_consensus={best['consensus']:.2f}"); print(line("VALIDACION",best))
-    test_r=backtest(df,panel,ts,te,best["threshold"],best["consensus"]); p=df[(df.index>=ts)&(df.index<te)]["Open"].astype(float); bh=float(p.iloc[-1]/p.iloc[0]-1) if len(p)>1 else 0.; bh_final=INITIAL_CASH*(1+bh); print("\n=== TEST CIEGO ==="); print(line("TEST IA",test_r)); print(f"TEST B&H: inicio=€{INITIAL_CASH:.2f} | final=€{bh_final:.2f} | ganado={bh_final-INITIAL_CASH:+.2f}€ | retorno={bh:+.2%}"); print(f"Diferencia IA vs B&H: {(test_r['ret']-bh):+.2%}")
+    print("\n=== ELEGIDO | VALIDACION ONLY ==="); print(f"threshold={best['threshold']:+.3%} | min_consensus={best['consensus']:.2f}"); print(line("VALIDACION",best)); test_r=backtest(df,panel,ts,te,best["threshold"],best["consensus"]); p=df[(df.index>=ts)&(df.index<te)]["Open"].astype(float); bh=float(p.iloc[-1]/p.iloc[0]-1) if len(p)>1 else 0.; bh_final=INITIAL_CASH*(1+bh); print("\n=== TEST CIEGO ==="); print(line("TEST IA",test_r)); print(f"TEST B&H: inicio=€{INITIAL_CASH:.2f} | final=€{bh_final:.2f} | ganado={bh_final-INITIAL_CASH:+.2f}€ | retorno={bh:+.2%}"); print(f"Diferencia IA vs B&H: {(test_r['ret']-bh):+.2%}")
     print("\n=== OPCIONES | SALIDA SELECCIONADA SOLO CON VALIDACION ==="); opt_best=None
     for mh in OPTION_MIN_HOLD_CANDIDATES:
         for cb in OPTION_EXIT_CONFIRM_CANDIDATES:
             r=option_backtest(df,panel,vs,ve,best["threshold"],best["consensus"],mh,cb); r.update(min_hold=mh,confirm_bars=cb,score=option_score(r)); print(f"min_hold={mh} | confirmacion={cb} | ret={r['ret']:+.2%} | trades={r['trades']} | avg_hold={r['avg_hold']:.1f} barras | DD={r['dd']:.2%} | Sharpe={r['sharpe']:.2f} | WR={r['wr']:.1%} | score={r['score']:+.4f}"); opt_best=r if opt_best is None or r["score"]>opt_best["score"] else opt_best
-    opt_test=option_backtest(df,panel,ts,te,best["threshold"],best["consensus"],opt_best["min_hold"],opt_best["confirm_bars"])
-    print(f"\nCALL config: DTE={OPTION_DTE} | delta={OPTION_DELTA:.2f} | IVx={OPTION_IV_MULT:.2f} | spread={OPTION_SPREAD:.1%} | budget={OPTION_BUDGET:.0%} | min_hold={opt_best['min_hold']} | confirmacion={opt_best['confirm_bars']} | max_hold={OPTION_MAX_HOLD}")
-    print(f"OPCIONES VALIDACION: inicio=€{INITIAL_CASH:.2f} | final=€{opt_best['final']:.2f} | ganado={opt_best['final']-INITIAL_CASH:+.2f}€ | retorno={opt_best['ret']:+.2%} | trades={opt_best['trades']} | avg_hold={opt_best['avg_hold']:.1f} | DD={opt_best['dd']:.2%} | Sharpe={opt_best['sharpe']:.2f} | WR={opt_best['wr']:.1%}")
-    print(f"OPCIONES TEST CIEGO: inicio=€{INITIAL_CASH:.2f} | final=€{opt_test['final']:.2f} | ganado={opt_test['final']-INITIAL_CASH:+.2f}€ | retorno={opt_test['ret']:+.2%} | trades={opt_test['trades']} | avg_hold={opt_test['avg_hold']:.1f} | DD={opt_test['dd']:.2%} | Sharpe={opt_test['sharpe']:.2f} | WR={opt_test['wr']:.1%}")
-    print("Limitacion critica: las primas son sinteticas; no equivalen a fills historicos reales de opciones.")
-    panel.to_csv("v31_predictions.csv"); opt_test["trace"].to_csv("v31_options_trace.csv")
-    print("Archivos: v31_predictions.csv | v31_options_trace.csv")
-    plot_candles_and_calls(df,opt_test["trace"],"V31 — NVDA 1H + operaciones CALL (test ciego)")
-    plot_equity(opt_test["trace"])
-    print(f"runtime={(time.time()-t0)/60:.1f} min")
+    opt_test=option_backtest(df,panel,ts,te,best["threshold"],best["consensus"],opt_best["min_hold"],opt_best["confirm_bars"]); print(f"\nCALL config: DTE={OPTION_DTE} | delta={OPTION_DELTA:.2f} | IVx={OPTION_IV_MULT:.2f} | spread={OPTION_SPREAD:.1%} | budget={OPTION_BUDGET:.0%} | min_hold={opt_best['min_hold']} | confirmacion={opt_best['confirm_bars']} | max_hold={OPTION_MAX_HOLD}"); print(f"OPCIONES VALIDACION: inicio=€{INITIAL_CASH:.2f} | final=€{opt_best['final']:.2f} | ganado={opt_best['final']-INITIAL_CASH:+.2f}€ | retorno={opt_best['ret']:+.2%} | trades={opt_best['trades']} | avg_hold={opt_best['avg_hold']:.1f} | DD={opt_best['dd']:.2%} | Sharpe={opt_best['sharpe']:.2f} | WR={opt_best['wr']:.1%}"); print(f"OPCIONES TEST CIEGO: inicio=€{INITIAL_CASH:.2f} | final=€{opt_test['final']:.2f} | ganado={opt_test['final']-INITIAL_CASH:+.2f}€ | retorno={opt_test['ret']:+.2%} | trades={opt_test['trades']} | avg_hold={opt_test['avg_hold']:.1f} | DD={opt_test['dd']:.2%} | Sharpe={opt_test['sharpe']:.2f} | WR={opt_test['wr']:.1%}"); print("Limitacion critica: las primas son sinteticas; no equivalen a fills historicos reales de opciones."); panel.to_csv("v31_predictions.csv"); opt_test["trace"].to_csv("v31_options_trace.csv"); plot_candles_and_calls(df,opt_test["trace"],"V31 — NVDA 1H + operaciones CALL (test ciego)"); plot_equity(opt_test["trace"]); print(f"runtime={(time.time()-t0)/60:.1f} min")
 
 if __name__=="__main__":main()
